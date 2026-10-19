@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import type { WebSocket } from 'ws';
 import WebSocketClient from 'ws';
 import { config } from './config.js';
+import { ProviderKeyPool } from './provider-key-pool.js';
 
 const MAX_UPSTREAM_QUEUE_MESSAGES = 256;
 const MAX_UPSTREAM_QUEUE_BYTES = 15 * 1024 * 1024;
@@ -23,6 +24,8 @@ interface Session {
   createdAt: number;
   expiresAt: number;
   usageSeconds: number;
+  providerKeyId: string;
+  providerApiKey: string;
   providerSessionId?: string;
   client?: WebSocket;
   upstream?: WebSocketClient;
@@ -33,6 +36,7 @@ interface Session {
   heartbeatTimer: NodeJS.Timeout;
   lastClientHeartbeatAt: number;
   stopped: boolean;
+  failureReported: boolean;
 }
 
 export interface SessionView {
@@ -89,7 +93,11 @@ function closeSocket(socket: WebSocket | WebSocketClient | undefined, code = 100
 export class SessionManager {
   private readonly sessions = new Map<string, Session>();
 
-  create(): SessionView {
+  constructor(private readonly providerKeyPool: ProviderKeyPool) {}
+
+  create(): SessionView | null {
+    const keyLease = this.providerKeyPool.acquire();
+    if (!keyLease) return null;
     const now = Date.now();
     const id = crypto.randomUUID();
     const session: Session = {
@@ -98,12 +106,15 @@ export class SessionManager {
       createdAt: now,
       expiresAt: now + config.sessionTtlSeconds * 1000,
       usageSeconds: 0,
+      providerKeyId: keyLease.id,
+      providerApiKey: keyLease.value,
       upstreamQueue: [],
       upstreamQueueBytes: 0,
       stopTimer: setTimeout(() => void this.stop(id, 'session_ttl'), config.sessionTtlSeconds * 1000),
       heartbeatTimer: setInterval(() => this.checkHeartbeat(id), 15_000),
       lastClientHeartbeatAt: now,
       stopped: false,
+      failureReported: false,
     };
     this.sessions.set(id, session);
     return this.view(session);
@@ -135,7 +146,7 @@ export class SessionManager {
 
   async connectUpstream(id: string): Promise<void> {
     const session = this.require(id);
-    const query = new URLSearchParams({ api_key: config.apiKey, model: config.model });
+    const query = new URLSearchParams({ api_key: session.providerApiKey, model: config.model });
     if (config.speed === 'fast') query.set('speed', 'fast');
 
     const upstream = new WebSocketClient(`${config.upstreamOrigin}?${query.toString()}`);
@@ -161,6 +172,7 @@ export class SessionManager {
     upstream.on('error', (error) => {
       const current = this.sessions.get(id);
       if (!current || current.stopped) return;
+      this.markProviderFailure(current);
       current.state = 'error';
       safeSend(current.client, { type: 'error', error: error.message || 'Provider connection failed' });
       void this.stop(id, 'provider_error');
@@ -168,6 +180,7 @@ export class SessionManager {
     upstream.on('close', () => {
       const current = this.sessions.get(id);
       if (!current || current.stopped) return;
+      this.markProviderFailure(current);
       current.state = current.state === 'stopping' ? 'stopping' : 'error';
       safeSend(current.client, { type: 'provider_closed' });
       void this.stop(id, 'provider_closed');
@@ -252,6 +265,7 @@ export class SessionManager {
     if (!session || session.stopped) return;
     session.stopped = true;
     session.state = 'stopping';
+    this.providerKeyPool.release(session.providerKeyId);
     clearTimeout(session.stopTimer);
     clearInterval(session.heartbeatTimer);
     if (session.upstreamConnectTimer) clearTimeout(session.upstreamConnectTimer);
@@ -303,6 +317,12 @@ export class SessionManager {
     const session = this.sessions.get(id);
     if (!session || session.stopped) return;
     if (Date.now() - session.lastClientHeartbeatAt > 35_000) void this.stop(id, 'heartbeat_timeout');
+  }
+
+  private markProviderFailure(session: Session): void {
+    if (session.failureReported) return;
+    session.failureReported = true;
+    this.providerKeyPool.markFailure(session.providerKeyId);
   }
 
   private require(id: string): Session {

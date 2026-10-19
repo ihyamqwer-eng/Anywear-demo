@@ -4,10 +4,11 @@ import websocket from '@fastify/websocket';
 import type { WebSocket } from 'ws';
 import { config, hasProviderKey } from './config.js';
 import { garments } from './garments.js';
+import { ProviderKeyPool } from './provider-key-pool.js';
 import { SessionManager } from './session-manager.js';
 
 const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' } });
-const sessions = new SessionManager();
+const sessions = new SessionManager(new ProviderKeyPool(config.providerKeys, config.providerKeyCooldownSeconds));
 
 async function requireAllowedOrigin(request: FastifyRequest, reply: FastifyReply): Promise<void> {
   const origin = request.headers.origin;
@@ -38,6 +39,12 @@ app.post('/api/sessions', { preHandler: requireAllowedOrigin }, async (_request,
   }
 
   const session = sessions.create();
+  if (!session) {
+    return reply.code(503).send({
+      error: 'No provider key is currently available',
+      code: 'PROVIDER_KEY_UNAVAILABLE',
+    });
+  }
   return reply.code(201).send({
     ...session,
     websocketPath: `/ws/realtime?session_id=${encodeURIComponent(session.sessionId)}`,

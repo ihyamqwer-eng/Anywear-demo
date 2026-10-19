@@ -17,7 +17,7 @@
 cd D:\workspace-hy\xinghua-策划\anywear-demo
 npm ci
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
-# 编辑 .env，填入 DECART_API_KEY
+# 编辑 .env，填入 DECART_API_KEYS 或兼容的 DECART_API_KEY
 npm run dev
 ```
 
@@ -54,6 +54,17 @@ Invoke-RestMethod http://localhost:8787/api/health
 ```
 
 没有 API Key 时，健康检查仍可用，但创建实时会话会返回明确配置错误；项目不会自动调用付费接口。
+
+## Decart API Key 卡池
+
+后端支持通过 `DECART_API_KEYS` 配置多张 Key，使用逗号或换行分隔。每个实时会话启动时绑定一张 Key，优先选择当前活跃会话较少的 Key；活跃数相同时按轮询顺序分配。上游连接异常的 Key 会进入 `DECART_KEY_COOLDOWN_SECONDS` 指定的冷却期，避免连续击穿同一张卡。已有的单 Key 配置 `DECART_API_KEY` 仍然兼容。
+
+```powershell
+DECART_API_KEYS=key_a,key_b,key_c
+DECART_KEY_COOLDOWN_SECONDS=60
+```
+
+Key 只在后端通过环境变量读取，不返回浏览器、不写日志、不写入镜像层。一次 WebRTC 会话不会中途换 Key；要换卡需要停止并重新开始会话。
 
 会话创建、停止和 WebSocket 握手仅接受 `ALLOWED_ORIGINS` 中的来源，默认允许本机 `127.0.0.1:5173` 与 `localhost:5173`。修改页面地址或端口时，请同步调整该配置。
 

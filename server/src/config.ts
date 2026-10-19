@@ -11,7 +11,16 @@ function positiveInteger(name: string, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+function providerKeys(): string[] {
+  const values = [process.env.DECART_API_KEYS ?? '', process.env.DECART_API_KEY ?? '']
+    .flatMap((value) => value.split(/[\r\n,]+/))
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return [...new Set(values)];
+}
+
 const speed = process.env.DECART_SPEED === 'fast' ? 'fast' : 'standard';
+const configuredProviderKeys = providerKeys();
 const defaultAllowedOrigins = ['http://127.0.0.1:5173', 'http://localhost:5173'];
 const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? defaultAllowedOrigins.join(','))
   .split(',')
@@ -19,7 +28,9 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? defaultAllowedOrigins.joi
   .filter(Boolean);
 
 export const config = {
-  apiKey: process.env.DECART_API_KEY?.trim() ?? '',
+  apiKey: configuredProviderKeys[0] ?? '',
+  providerKeys: configuredProviderKeys,
+  providerKeyCooldownSeconds: positiveInteger('DECART_KEY_COOLDOWN_SECONDS', 60),
   model: process.env.DECART_MODEL?.trim() || 'lucy-vton-3.6',
   speed,
   host: process.env.HOST?.trim() || '127.0.0.1',
@@ -31,5 +42,5 @@ export const config = {
 } as const;
 
 export function hasProviderKey(): boolean {
-  return config.apiKey.length > 0;
+  return config.providerKeys.length > 0;
 }

@@ -22,6 +22,7 @@ Date: 2026-10-19
 - Added in-page garment upload for JPG, PNG, and WebP files up to 10 MiB; uploaded images remain in page memory only and can be selected before or during a session.
 - Added the `extension` Chrome MV3 package: clicking an image on an HTTP/HTTPS page opens a 460×820 Anywear popup and passes the image into the compact page. The popup reports a clear startup error when the local app is unavailable.
 - Added compact-mode single-column layout rules so the popup remains usable even when its viewport is wider than the intended window size.
+- Added a backend Decart API Key pool: `DECART_API_KEYS` accepts comma/newline-separated keys, sessions use least-active round-robin assignment, and upstream connection failures temporarily cool down the affected key. The existing `DECART_API_KEY` setting remains compatible.
 
 ## Verification
 
@@ -36,12 +37,13 @@ Date: 2026-10-19
 - Session-manager smoke check: a `set_image` message with `image_data: null` was rejected without queueing; a small valid base64 image was queued, then the test session was stopped.
 - After adding the origin guard and production dependency changes, `npm run typecheck`, `npm run build`, and `docker compose config --quiet` passed. Offline npm workspace production-install dry run excludes TypeScript, tsx, Vite, and other development packages. `npm ls --depth=0` is consistent with the manifests and lockfile.
 - Browser page remains idle with all five garments visible and the selected garment name and pressed state aligned. Health and garment endpoints returned success.
-- `docker compose config --quiet` passed. A full Docker build was retried but could not fetch metadata for `node:24.18.1-bookworm-slim` because the Docker Hub auth endpoint timed out; image construction remains unverified.
+- `docker compose config --quiet` passed. After the Docker proxy became available, the images built successfully with `DOCKER_BUILDKIT=0`; both containers were recreated and the backend health check passed.
 - Final verification: `npm run typecheck`, `npm run build`, extension JavaScript syntax checks, manifest JSON parsing, and `docker compose config --quiet` passed. A local PNG upload entered the garment rail and became selected; compact-mode garment collapse worked; browser console reported no errors. No camera permission or paid generation request was initiated.
+- Key-pool verification remains pending until multiple test keys are supplied; no key values are stored in source, logs, or documentation.
 
 ## Remaining Risks
 
 - The PNG references are rasterized placeholder illustrations, not product photography; visual try-on quality may remain poor until they are replaced with clean, authorized garment photos.
 - A live Decart `set_image_ack` and resulting generated video were not verified.
-- Docker build still requires working access to Docker Hub to fetch `node:24.18.1-bookworm-slim` and the Nginx base image.
-- The project directory has no Git metadata, so historical diff and tracked-file status cannot be verified. Current directory boundaries are consistent: client, server, build/deployment config, private source assets, public runtime images, and docs are separated; no broad file moves were warranted.
+- Docker Desktop's BuildKit path still failed to fetch the Node metadata in this environment; the verified fallback is `DOCKER_BUILDKIT=0 docker compose build`.
+- The repository is anchored at `origin/main`; the current source layout remains separated into client, server, build/deployment config, private source assets, public runtime images, and docs.
