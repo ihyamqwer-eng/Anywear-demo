@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Anywear 网页小窗试衣",
+  "version": "0.1.0",
+  "description": "点击网页上的衣服图片，在 Anywear 本地小窗中试衣。",
+  "permissions": ["windows"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Anywear 网页小窗试衣"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; frame-src http://127.0.0.1:5173 http://localhost:5173"
+  }
+}
