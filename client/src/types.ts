@@ -57,6 +57,17 @@ export interface ProviderKeyPoolStatus {
   cards: ProviderKeyCard[];
 }
 
+export interface AdminProviderKeyCard extends ProviderKeyCard {
+  label: string;
+  keyHint: string;
+  enabled: boolean;
+}
+
+export interface AdminProviderKeyPoolStatus {
+  poolId: string;
+  cards: AdminProviderKeyCard[];
+}
+
 export interface ProviderKeySelection {
   providerKeyId: string;
   poolId: string;

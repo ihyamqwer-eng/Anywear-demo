@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ArrowLeft, Check, CircleDashed, Clock3, KeyRound, RefreshCw } from 'lucide-react';
+import { ArrowLeft, Check, CircleDashed, Clock3, KeyRound, RefreshCw, Settings2 } from 'lucide-react';
 import { fetchProviderKeys } from './api';
 import { getSelectedProviderKeySelection, saveSelectedProviderKeySelection } from './provider-key-selection';
 import type { ProviderKeyCard } from './types';
@@ -73,6 +73,9 @@ function ProviderKeysPage() {
           <button className="icon-button" type="button" onClick={() => void loadCards()} disabled={loading} aria-label="刷新卡池" title="刷新卡池">
             <RefreshCw size={17} />
           </button>
+          <a className="secondary-button provider-manage-button" href="/cards/manage">
+            <Settings2 size={15} />管理卡池
+          </a>
           <a className="secondary-button provider-back-button" href={new URLSearchParams(window.location.search).has('compact') ? '/?compact=1' : '/'}>
             <ArrowLeft size={15} />返回试衣
           </a>

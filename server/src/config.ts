@@ -3,9 +3,10 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
+const applicationRoot = resolve(process.env.ANYWEAR_APP_ROOT?.trim() || resolve(moduleDirectory, '..', '..'));
+const dataDirectory = process.env.ANYWEAR_DATA_DIR?.trim();
 if (process.env.NODE_ENV !== 'test') {
-  dotenv.config({ path: resolve(moduleDirectory, '..', '..', '.env') });
-  dotenv.config();
+  dotenv.config({ path: dataDirectory ? resolve(dataDirectory, '.env') : resolve(applicationRoot, '.env') });
 }
 
 function positiveInteger(name: string, fallback: number): number {
@@ -67,24 +68,32 @@ function garmentGroups(): GarmentGroupConfig[] {
 
 const speed = process.env.DECART_SPEED === 'fast' ? 'fast' : 'standard';
 const configuredProviderKeys = providerKeys();
-const defaultAllowedOrigins = ['http://127.0.0.1:5173', 'http://localhost:5173'];
+const defaultAllowedOrigins = [
+  'http://127.0.0.1:1111',
+  'http://localhost:1111',
+  'http://127.0.0.1:5173',
+  'http://localhost:5173',
+];
 const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? defaultAllowedOrigins.join(','))
   .split(',')
   .map((origin) => origin.trim())
   .filter(Boolean);
 
 export const config = {
+  applicationRoot,
+  providerKeyStorePath: resolve(dataDirectory || resolve(applicationRoot, '.anywear-data'), 'provider-keys.json'),
   apiKey: configuredProviderKeys[0] ?? '',
   providerKeys: configuredProviderKeys,
   providerKeyCooldownSeconds: nonNegativeInteger('DECART_KEY_COOLDOWN_SECONDS', 0),
-  garmentLibraryRoot: process.env.GARMENT_LIBRARY_ROOT?.trim() || resolve(moduleDirectory, '..', '..', 'garment-library'),
+  garmentLibraryRoot: process.env.GARMENT_LIBRARY_ROOT?.trim()
+    || resolve(dataDirectory || applicationRoot, 'garment-library'),
   garmentGroups: garmentGroups(),
   model: process.env.DECART_MODEL?.trim() || 'lucy-vton-3.6',
   speed,
   host: process.env.HOST?.trim() || '127.0.0.1',
   sessionTtlSeconds: positiveInteger('SESSION_TTL_SECONDS', 120),
   maxGenerationSeconds: positiveInteger('MAX_GENERATION_SECONDS', 120),
-  port: positiveInteger('PORT', 8787),
+  port: positiveInteger('PORT', 1111),
   allowedOrigins,
   upstreamOrigin: 'wss://api.decart.ai/v1/stream',
 } as const;

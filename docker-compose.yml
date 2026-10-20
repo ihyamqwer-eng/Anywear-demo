@@ -9,13 +9,19 @@ services:
       HOST: 0.0.0.0
       PORT: 8787
       GARMENT_LIBRARY_ROOT: /garment-library
+      ANYWEAR_DATA_DIR: /data
+      ANYWEAR_TRUST_PROXY: "true"
+      ANYWEAR_TRUSTED_PROXY_HOST: frontend
     volumes:
+      - anywear-data:/data
       - type: bind
         source: ${GARMENT_LIBRARY_HOST_PATH:-./garment-library}
         target: /garment-library
         read_only: true
     expose:
       - "8787"
+    ports:
+      - "127.0.0.1:8787:8787"
     logging:
       driver: json-file
       options:
@@ -56,3 +62,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  anywear-data:

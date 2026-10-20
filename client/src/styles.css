@@ -160,6 +160,7 @@ button { font: inherit; }
 .provider-page-topbar { align-items: center; }
 .provider-page-actions { display: flex; align-items: center; gap: 10px; }
 .provider-back-button { text-decoration: none; }
+.provider-manage-button { text-decoration: none; }
 .provider-settings { width: min(100%, 760px); margin: 42px auto 0; }
 .provider-page-heading { margin-bottom: 22px; }
 .provider-page-heading h2 { margin: 5px 0 4px; color: var(--text-strong); font-size: 24px; font-weight: 600; }
@@ -181,6 +182,29 @@ button { font: inherit; }
 .provider-note, .provider-empty { margin: 14px 0 0; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
 .provider-empty { color: var(--warning); }
 .provider-settings > .error-ribbon { margin: 12px 0; }
+.provider-manager { width: min(100%, 860px); }
+.provider-key-form { display: grid; gap: 14px; margin-bottom: 18px; padding: 16px; border: 1px solid var(--border-default); border-radius: 8px; background: var(--surface); }
+.provider-key-form-heading { display: flex; align-items: center; gap: 8px; color: var(--text-strong); font-size: 13px; }
+.provider-key-form-heading svg { color: var(--tech-accent); }
+.provider-key-fields { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(150px, 1fr) auto; align-items: end; gap: 10px; }
+.provider-field { display: grid; gap: 6px; min-width: 0; color: var(--text-secondary); font-size: 11px; }
+.provider-field input { width: 100%; min-height: 38px; padding: 0 11px; border: 1px solid var(--border-default); border-radius: 5px; outline: none; color: var(--text-main); background: var(--surface-control); font: inherit; }
+.provider-field input:focus { border-color: var(--tech-accent); }
+.provider-field input:disabled { opacity: .6; }
+.provider-add-button { min-width: 82px; }
+.provider-manager-error { margin: 0 0 12px; }
+.provider-manager-list { display: grid; gap: 8px; }
+.provider-manager-card { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto auto; align-items: center; gap: 12px; min-height: 72px; padding: 10px 12px; border: 1px solid var(--border-default); border-radius: 5px; background: var(--surface); }
+.provider-manager-card.is-disabled { border-style: dashed; background: rgba(255, 255, 255, .025); }
+.provider-manager-card.is-disabled .provider-manager-card-copy strong { color: var(--text-secondary); }
+.provider-manager-card-copy { display: grid; min-width: 0; gap: 4px; }
+.provider-manager-card-copy strong { overflow: hidden; color: var(--text-strong); font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.provider-key-hint { overflow: hidden; color: var(--text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.provider-manager-card-meta { display: inline-flex; align-items: center; gap: 5px; color: var(--text-secondary); font-size: 11px; white-space: nowrap; }
+.provider-manager-card-meta svg { color: var(--tech-accent); }
+.provider-manager-card-actions { display: flex; gap: 7px; }
+.provider-card-action { width: 32px; height: 32px; background: var(--surface-raised); }
+.provider-remove-button:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
 
 @media (max-width: 640px) {
   .mirror-shell { padding: 18px 12px 24px; }
@@ -204,6 +228,15 @@ button { font: inherit; }
   .provider-page-heading h2 { font-size: 21px; }
   .provider-choice { grid-template-columns: 34px minmax(0, 1fr) auto 16px; gap: 8px; padding: 9px; }
   .provider-card-status { font-size: 10px; }
+  .provider-page-actions { gap: 7px; }
+  .provider-manage-button { width: 36px; padding: 0; }
+  .provider-manage-button svg { margin: 0; }
+  .provider-manage-button { font-size: 0; }
+  .provider-key-fields { grid-template-columns: 1fr; }
+  .provider-add-button { width: 100%; }
+  .provider-manager-card { grid-template-columns: 34px minmax(0, 1fr) auto; gap: 9px; padding: 9px; }
+  .provider-manager-card-meta { grid-column: 2; grid-row: 2; }
+  .provider-manager-card-actions { grid-column: 3; grid-row: 1 / span 2; }
 }
 
 @media (max-width: 380px) {

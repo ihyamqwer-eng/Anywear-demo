@@ -82,6 +82,19 @@ test('keeps failed keys available when cooldown is disabled', () => {
   pool.release(retry!.id);
 });
 
+test('keeps key IDs stable across removal and never reuses removed IDs', () => {
+  const pool = new ProviderKeyPool(['placeholder-key-a', 'placeholder-key-b'], 0);
+  const originalPoolId = pool.poolId;
+  const addedId = pool.add('placeholder-key-c', 'Third card');
+  assert.equal(addedId, 'provider-key-3');
+  assert.notEqual(pool.poolId, originalPoolId);
+
+  assert.equal(pool.remove('provider-key-1'), true);
+  assert.deepEqual(pool.getStatus().map((card) => card.id), ['provider-key-2', 'provider-key-3']);
+  assert.equal(pool.add('placeholder-key-d'), 'provider-key-4');
+  assert.equal(pool.has('provider-key-1'), false);
+});
+
 test('uses the manually selected key for the upstream WebSocket connection', async (context) => {
   const httpServer = createServer();
   const upstreamServer = new WebSocketServer({ server: httpServer, path: '/v1/stream' });

@@ -1,7 +1,12 @@
 node_modules/
 dist/
 .env
+.anywear-data/
+provider-keys.json
+provider-keys.json.*.tmp
 .certs/
 *.log
 garment-library/**
 !garment-library/.gitkeep
+installer/staging/
+installer/output/

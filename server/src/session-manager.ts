@@ -309,6 +309,10 @@ export class SessionManager {
     setTimeout(() => this.sessions.delete(id), 5_000);
   }
 
+  async stopAll(reason: string): Promise<void> {
+    await Promise.all([...this.sessions.keys()].map((id) => this.stop(id, reason)));
+  }
+
   private handleUpstreamMessage(id: string, raw: string): void {
     const session = this.sessions.get(id);
     if (!session || session.stopped) return;

@@ -23,6 +23,21 @@ npm run dev
 
 打开 <http://127.0.0.1:5173>。本机回环地址可使用摄像头，不需要额外配置 HTTPS。通过局域网 IP 使用时，浏览器将 HTTP 页面视为不安全来源并禁用摄像头；按下方步骤配置受浏览器信任的 HTTPS 证书。
 
+## Windows 安装版
+
+内部 Windows x64 安装版提供本机 Node.js 运行时，不要求安装 Docker 或 Node。安装后打开新的 PowerShell 或命令提示符窗口运行：
+
+```powershell
+anywear start
+anywear status
+anywear stop
+anywear config
+```
+
+`start` 会在后台启动本机服务，并在 Chrome 普通浏览器窗口打开 <http://127.0.0.1:1111>；若 Chrome 未安装则使用 Edge。关闭浏览器窗口不会自动停止服务，需运行 `anywear stop`。服务只监听本机回环地址，不提供局域网访问。`config` 打开当前用户的 `.env` 配置文件。
+
+本安装包按内部要求嵌入构建时的 `.env`，安装时仅在用户配置尚不存在时初始化；升级不会覆盖已有配置。安装包可被解包，包含其中的 API Key，应按凭证文件限制分发，不要上传到 GitHub 或公开发布。生成安装包请在有 Inno Setup 的 Windows x64 构建机运行 `scripts/package-windows.ps1`；最终 EXE 保存在本地发布目录并被 Git 忽略。
+
 页面内支持通过「上传衣服照片」加入单张图片，或在服装分组栏点击「选择图组目录」导入整个本机目录。支持 JPG、PNG、WebP，单张不超过 10 MB；目录导入会按所选根目录创建临时图组。文件只保存在当前页面内存中，不会保存本机绝对路径，刷新后需要重新选择。
 
 ## 网页图片小窗试衣
@@ -106,7 +121,11 @@ DECART_API_KEYS=key_a,key_b,key_c
 DECART_KEY_COOLDOWN_SECONDS=0
 ```
 
-Key 只在后端通过环境变量读取，不返回浏览器、不写日志、不写入镜像层。一次 WebRTC 会话不会中途换 Key；要换卡需要停止并重新开始会话。
+在 `/cards` 选择 API 卡；从该页进入 `/cards/manage` 可以添加带标签的 Key、查看脱敏尾号和活跃会话数、启用/停用卡片、移除未被会话占用的卡。停用只影响新会话，已有会话会继续运行。添加成功后只显示脱敏提示，不会再次返回完整 Key；Key 不写日志，也不进入镜像层。管理接口仅允许从运行服务的本机回环地址访问，不能从局域网 IP 管理。
+
+管理页首次修改卡池时，会把当前环境变量导入结果和后续修改写入 `provider-keys.json`。文件位于 `ANYWEAR_DATA_DIR`；未设置时位于项目根目录下的 `.anywear-data`。此文件含明文凭证，应按密钥文件保护且不会提交到 Git。文件存在后将作为卡池来源，后续 `.env` 中的 Key 变更不会覆盖它；删除文件后才重新从环境变量初始化。Docker 使用 `anywear-data` 命名卷保存管理卡池；普通容器重建会保留，执行 `docker compose down -v` 会删除该卷。同一数据目录仅支持一个后端进程。
+
+卡池新增或移除会更新 `poolId`，以免浏览器保存的旧卡号指向错误凭证。一次 WebRTC 会话不会中途换 Key；活跃会话占用的卡不能移除，要先停止会话。
 
 会话创建、停止和 WebSocket 握手仅接受 `ALLOWED_ORIGINS` 中的来源，默认允许本机 `127.0.0.1:5173` 与 `localhost:5173`。修改页面地址或端口时，请同步调整该配置。
 
@@ -121,7 +140,7 @@ Key 只在后端通过环境变量读取，不返回浏览器、不写日志、�
 
 ## Docker 启动
 
-Docker 版本把前端和后端封装为两个容器：Nginx 在 `5173` 端口提供页面，并反代 API 和 WebSocket；后端容器不直接暴露到宿主机。Decart API Key 通过 `.env` 注入，不会写入镜像层。
+Docker 版本把前端和后端封装为两个容器：Nginx 在 `5173` 端口提供页面，并反代 API 和 WebSocket；后端容器不直接暴露到宿主机。初始 Decart API Key 通过 `.env` 注入，不会写入镜像层；卡池管理写入独立的 `anywear-data` 命名卷。
 
 ```powershell
 cd D:\workspace-hy\xinghua-策划\anywear-demo

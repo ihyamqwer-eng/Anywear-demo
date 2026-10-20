@@ -1,4 +1,4 @@
-import type { Garment, GarmentGroup, ProviderKeyPoolStatus, ProviderKeySelection, SessionResponse } from './types';
+import type { AdminProviderKeyPoolStatus, Garment, GarmentGroup, ProviderKeyPoolStatus, ProviderKeySelection, SessionResponse } from './types';
 
 export class ApiError extends Error {
   constructor(message: string, readonly code?: string) {
@@ -8,8 +8,14 @@ export class ApiError extends Error {
 }
 
 async function readJson<T>(response: Response): Promise<T> {
-  const body = (await response.json()) as T & { error?: string; code?: string };
-  if (!response.ok) throw new ApiError(body.error || `Request failed: ${response.status}`, body.code);
+  let body: (T & { error?: string; code?: string }) | null = null;
+  try {
+    body = (await response.json()) as T & { error?: string; code?: string };
+  } catch {
+    body = null;
+  }
+  if (!response.ok) throw new ApiError(body?.error || `Request failed: ${response.status}`, body?.code);
+  if (!body) throw new ApiError('服务器返回了无效响应');
   return body;
 }
 
@@ -23,6 +29,32 @@ export async function fetchGarments(): Promise<Garment[]> {
 
 export async function fetchProviderKeys(): Promise<ProviderKeyPoolStatus> {
   return readJson<ProviderKeyPoolStatus>(await fetch('/api/provider-keys', { cache: 'no-store' }));
+}
+
+export async function fetchAdminProviderKeys(): Promise<AdminProviderKeyPoolStatus> {
+  return readJson<AdminProviderKeyPoolStatus>(await fetch('/api/admin/provider-keys', { cache: 'no-store' }));
+}
+
+export async function addAdminProviderKey(key: string, label?: string): Promise<AdminProviderKeyPoolStatus> {
+  return readJson<AdminProviderKeyPoolStatus>(await fetch('/api/admin/provider-keys', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ key, ...(label ? { label } : {}) }),
+  }));
+}
+
+export async function setAdminProviderKeyEnabled(id: string, enabled: boolean): Promise<AdminProviderKeyPoolStatus> {
+  return readJson<AdminProviderKeyPoolStatus>(await fetch(`/api/admin/provider-keys/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  }));
+}
+
+export async function removeAdminProviderKey(id: string): Promise<AdminProviderKeyPoolStatus> {
+  return readJson<AdminProviderKeyPoolStatus>(await fetch(`/api/admin/provider-keys/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  }));
 }
 
 export async function createSession(selection?: ProviderKeySelection): Promise<SessionResponse> {
