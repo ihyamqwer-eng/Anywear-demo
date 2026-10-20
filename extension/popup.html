@@ -3,12 +3,18 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Anywear 小窗试衣</title>
+    <title>青叶科技 网页小窗试衣</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
-    <div id="loading">正在准备网页服装</div>
-    <iframe id="anywear" title="Anywear 小窗试衣" allow="camera; microphone" hidden></iframe>
+    <div id="loading">
+      <div class="loading-panel">
+        <img class="brand-mark" src="icons/icon128.png" alt="青叶科技" />
+        <p class="brand-name">青叶科技</p>
+        <p class="loading-status">正在准备网页服装</p>
+      </div>
+    </div>
+    <iframe id="anywear" title="青叶科技网页小窗试衣" allow="camera; microphone" hidden></iframe>
     <script src="popup.js"></script>
   </body>
 </html>

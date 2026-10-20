@@ -16,6 +16,12 @@ export interface Garment {
   enabled: boolean;
 }
 
+export interface GarmentGroup {
+  id: string;
+  name: string;
+  garments: Garment[];
+}
+
 export interface ProviderMessage {
   type: string;
   sdp?: string;
@@ -34,6 +40,24 @@ export interface ProviderMessage {
 export interface SessionResponse {
   sessionId: string;
   state: SessionState;
+  providerKeyId: string;
   expiresAt: string;
   websocketPath: string;
+}
+
+export interface ProviderKeyCard {
+  id: string;
+  number: number;
+  activeSessions: number;
+  cooldownSecondsRemaining: number;
+}
+
+export interface ProviderKeyPoolStatus {
+  poolId: string;
+  cards: ProviderKeyCard[];
+}
+
+export interface ProviderKeySelection {
+  providerKeyId: string;
+  poolId: string;
 }

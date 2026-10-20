@@ -4,16 +4,59 @@ html, body, #anywear {
   margin: 0;
   border: 0;
   overflow: hidden;
-  background: #0f1515;
+  background: #17191a;
 }
 
-body { min-width: 320px; min-height: 560px; }
+body {
+  min-width: 320px;
+  min-height: 560px;
+  color: #f4f7f7;
+  font-family: "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+}
 
 #loading {
   display: grid;
   height: 100%;
   place-items: center;
-  color: #f4f1eb;
-  background: #0f1515;
-  font: 13px system-ui, sans-serif;
+  background: #17191a;
+}
+
+.loading-panel {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 32px;
+}
+
+.brand-mark {
+  width: 64px;
+  height: 64px;
+  border: 1px solid #3a4244;
+  background: #ffffff;
+}
+
+.brand-name,
+.loading-status {
+  margin: 0;
+}
+
+.brand-name {
+  color: #f4f7f7;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.loading-status {
+  color: #9fb1b4;
+  font-size: 13px;
+}
+
+.loading-status::after {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-left: 8px;
+  border-radius: 50%;
+  background: #6dc8d2;
+  content: "";
 }

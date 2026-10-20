@@ -1,20 +1,35 @@
-import type { Garment, SessionResponse } from './types';
+import type { Garment, GarmentGroup, ProviderKeyPoolStatus, ProviderKeySelection, SessionResponse } from './types';
+
+export class ApiError extends Error {
+  constructor(message: string, readonly code?: string) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
 
 async function readJson<T>(response: Response): Promise<T> {
-  const body = (await response.json()) as T & { error?: string };
-  if (!response.ok) throw new Error(body.error || `Request failed: ${response.status}`);
+  const body = (await response.json()) as T & { error?: string; code?: string };
+  if (!response.ok) throw new ApiError(body.error || `Request failed: ${response.status}`, body.code);
   return body;
+}
+
+export async function fetchGarmentGroups(): Promise<GarmentGroup[]> {
+  return readJson<GarmentGroup[]>(await fetch('/api/garment-groups'));
 }
 
 export async function fetchGarments(): Promise<Garment[]> {
   return readJson<Garment[]>(await fetch('/api/garments'));
 }
 
-export async function createSession(): Promise<SessionResponse> {
+export async function fetchProviderKeys(): Promise<ProviderKeyPoolStatus> {
+  return readJson<ProviderKeyPoolStatus>(await fetch('/api/provider-keys', { cache: 'no-store' }));
+}
+
+export async function createSession(selection?: ProviderKeySelection): Promise<SessionResponse> {
   return readJson<SessionResponse>(await fetch('/api/sessions', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: '{}',
+    body: JSON.stringify(selection ?? {}),
   }));
 }
 

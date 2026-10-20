@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import type { FastifyBaseLogger } from 'fastify';
 import type { WebSocket } from 'ws';
 import WebSocketClient from 'ws';
 import { config } from './config.js';
@@ -42,6 +43,7 @@ interface Session {
 export interface SessionView {
   sessionId: string;
   state: SessionState;
+  providerKeyId: string;
   createdAt: string;
   expiresAt: string;
   usageSeconds: number;
@@ -93,10 +95,14 @@ function closeSocket(socket: WebSocket | WebSocketClient | undefined, code = 100
 export class SessionManager {
   private readonly sessions = new Map<string, Session>();
 
-  constructor(private readonly providerKeyPool: ProviderKeyPool) {}
+  constructor(
+    private readonly providerKeyPool: ProviderKeyPool,
+    private readonly upstreamOrigin = config.upstreamOrigin,
+    private readonly logger?: FastifyBaseLogger,
+  ) {}
 
-  create(): SessionView | null {
-    const keyLease = this.providerKeyPool.acquire();
+  create(providerKeyId?: string): SessionView | null {
+    const keyLease = this.providerKeyPool.acquire(providerKeyId);
     if (!keyLease) return null;
     const now = Date.now();
     const id = crypto.randomUUID();
@@ -117,6 +123,7 @@ export class SessionManager {
       failureReported: false,
     };
     this.sessions.set(id, session);
+    this.logger?.info({ event: 'session.created', sessionId: id, expiresAt: new Date(session.expiresAt).toISOString() }, 'Realtime session created');
     return this.view(session);
   }
 
@@ -128,6 +135,7 @@ export class SessionManager {
     return {
       sessionId: session.id,
       state: session.state,
+      providerKeyId: session.providerKeyId,
       createdAt: new Date(session.createdAt).toISOString(),
       expiresAt: new Date(session.expiresAt).toISOString(),
       usageSeconds: session.usageSeconds,
@@ -141,6 +149,7 @@ export class SessionManager {
     session.client = client;
     session.state = 'signaling';
     session.lastClientHeartbeatAt = Date.now();
+    this.logger?.info({ event: 'session.client_attached', sessionId: id }, 'Browser signaling client attached');
     return true;
   }
 
@@ -149,11 +158,14 @@ export class SessionManager {
     const query = new URLSearchParams({ api_key: session.providerApiKey, model: config.model });
     if (config.speed === 'fast') query.set('speed', 'fast');
 
-    const upstream = new WebSocketClient(`${config.upstreamOrigin}?${query.toString()}`);
+    const upstream = new WebSocketClient(`${this.upstreamOrigin}?${query.toString()}`);
     session.upstream = upstream;
+    this.logger?.info({ event: 'provider.websocket_connecting', sessionId: id, model: config.model, speed: config.speed }, 'Connecting to realtime provider');
     session.upstreamConnectTimer = setTimeout(() => {
       const current = this.sessions.get(id);
       if (!current || current.stopped || current.upstream !== upstream || upstream.readyState !== WebSocketClient.CONNECTING) return;
+      this.markProviderFailure(current);
+      this.logger?.warn({ event: 'provider.websocket_timeout', sessionId: id }, 'Realtime provider connection timed out');
       safeSend(current.client, { type: 'error', error: 'Provider connection timed out' });
       void this.stop(id, 'provider_connect_timeout');
     }, 20_000);
@@ -164,6 +176,7 @@ export class SessionManager {
       if (current.upstreamConnectTimer) clearTimeout(current.upstreamConnectTimer);
       const queuedMessages = current.upstreamQueue.splice(0);
       current.upstreamQueueBytes = 0;
+      this.logger?.info({ event: 'provider.websocket_open', sessionId: id, queuedMessages: queuedMessages.length }, 'Realtime provider connected');
       for (const message of queuedMessages) upstream.send(message);
       safeSend(current.client, { type: 'proxy_ready' });
     });
@@ -173,14 +186,21 @@ export class SessionManager {
       const current = this.sessions.get(id);
       if (!current || current.stopped) return;
       this.markProviderFailure(current);
+      this.logger?.error({
+        event: 'provider.websocket_error',
+        sessionId: id,
+        errorName: error.name,
+        errorCode: 'code' in error ? error.code : undefined,
+      }, 'Realtime provider socket failed');
       current.state = 'error';
       safeSend(current.client, { type: 'error', error: error.message || 'Provider connection failed' });
       void this.stop(id, 'provider_error');
     });
-    upstream.on('close', () => {
+    upstream.on('close', (code) => {
       const current = this.sessions.get(id);
       if (!current || current.stopped) return;
-      this.markProviderFailure(current);
+      if (code !== 1000 && code !== 1001) this.markProviderFailure(current);
+      this.logger?.warn({ event: 'provider.websocket_closed', sessionId: id, closeCode: code }, 'Realtime provider socket closed');
       current.state = current.state === 'stopping' ? 'stopping' : 'error';
       safeSend(current.client, { type: 'provider_closed' });
       void this.stop(id, 'provider_closed');
@@ -207,6 +227,8 @@ export class SessionManager {
       safeSend(session.client, { type: 'heartbeat_ack' });
       return;
     }
+
+    this.logger?.info({ event: 'session.client_message', sessionId: id, type: message.type }, 'Realtime signaling message received');
 
     if (!allowedProviderMessages.has(message.type)) {
       safeSend(session.client, { type: 'error', error: `Unsupported message type: ${message.type}` });
@@ -235,6 +257,7 @@ export class SessionManager {
         return;
       }
       session.state = 'switching';
+      this.logger?.info({ event: 'session.reference_image', sessionId: id, imageBytes: decodedBytes }, 'Reference image queued');
     }
 
     const serialized = JSON.stringify(message);
@@ -257,6 +280,7 @@ export class SessionManager {
     const session = this.sessions.get(id);
     if (!session || session.stopped) return;
     session.client = undefined;
+    this.logger?.warn({ event: 'session.client_disconnected', sessionId: id }, 'Browser signaling client disconnected');
     void this.stop(id, 'client_disconnected');
   }
 
@@ -265,6 +289,13 @@ export class SessionManager {
     if (!session || session.stopped) return;
     session.stopped = true;
     session.state = 'stopping';
+    this.logger?.info({
+      event: 'session.stopped',
+      sessionId: id,
+      reason,
+      durationMs: Date.now() - session.createdAt,
+      usageSeconds: session.usageSeconds,
+    }, 'Realtime session stopped');
     this.providerKeyPool.release(session.providerKeyId);
     clearTimeout(session.stopTimer);
     clearInterval(session.heartbeatTimer);
@@ -290,6 +321,10 @@ export class SessionManager {
     }
 
     if (message && typeof message === 'object' && 'type' in message && typeof message.type === 'string') {
+      if (['session_id', 'generation_started', 'generation_ended', 'set_image_ack', 'error'].includes(message.type)) {
+        const level = message.type === 'error' ? 'error' : 'info';
+        this.logger?.[level]({ event: 'provider.message', sessionId: id, type: message.type }, 'Realtime provider event received');
+      }
       if (message.type === 'session_id' && 'session_id' in message && typeof message.session_id === 'string') {
         session.providerSessionId = message.session_id;
       } else if (message.type === 'generation_started') {

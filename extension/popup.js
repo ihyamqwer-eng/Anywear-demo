@@ -25,7 +25,7 @@ async function loadImageData() {
 
 frame.src = `${appOrigin}/?compact=1&extension=1`;
 frame.addEventListener('error', () => {
-  loading.textContent = '本地 Anywear 页面无法加载，请先启动 npm run dev';
+  loading.textContent = '青叶科技本地页面无法加载，请先启动 npm run dev';
 });
 frame.addEventListener('load', async () => {
   try {

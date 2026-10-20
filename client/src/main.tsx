@@ -1,6 +1,13 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
+import ProviderKeysPage from './ProviderKeysPage';
+import { getBrowserDiagnosticContext, installGlobalDiagnosticHandlers, logDiagnostic } from './diagnostics';
 import './styles.css';
 
-createRoot(document.getElementById('root')!).render(<StrictMode><App /></StrictMode>);
+installGlobalDiagnosticHandlers();
+logDiagnostic('info', 'app.loaded', getBrowserDiagnosticContext());
+
+const Page = window.location.pathname === '/cards' ? ProviderKeysPage : App;
+
+createRoot(document.getElementById('root')!).render(<StrictMode><Page /></StrictMode>);

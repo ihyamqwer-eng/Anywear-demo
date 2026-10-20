@@ -1,4 +1,4 @@
-# Anywear 类实时试衣 Demo
+# 青叶科技实时虚拟试衣 Demo
 
 本项目是一个本机单路展示 Demo：浏览器采集摄像头，后端代理 Decart 官方 WebSocket 信令，浏览器与 Decart 直接建立 WebRTC 媒体连接。
 
@@ -21,13 +21,13 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 npm run dev
 ```
 
-打开 <http://127.0.0.1:5173>。本机回环地址可使用摄像头，不需要额外配置 HTTPS。
+打开 <http://127.0.0.1:5173>。本机回环地址可使用摄像头，不需要额外配置 HTTPS。通过局域网 IP 使用时，浏览器将 HTTP 页面视为不安全来源并禁用摄像头；按下方步骤配置受浏览器信任的 HTTPS 证书。
 
-页面内支持通过「上传衣服照片」加入 JPG、PNG 或 WebP 服装图，单张不超过 10 MB。上传图片只保存在当前页面内存中，停止或刷新后不会保留。
+页面内支持通过「上传衣服照片」加入单张图片，或在服装分组栏点击「选择图组目录」导入整个本机目录。支持 JPG、PNG、WebP，单张不超过 10 MB；目录导入会按所选根目录创建临时图组。文件只保存在当前页面内存中，不会保存本机绝对路径，刷新后需要重新选择。
 
 ## 网页图片小窗试衣
 
-`extension` 目录提供一个无需构建的 Chrome MV3 扩展。安装后，在其他 HTTP/HTTPS 网页点击图片，会打开一个独立小窗，将该图片带入本地 Anywear 页面；小窗内仍需手动点击「开始试衣」。
+`extension` 目录提供一个无需构建的 Chrome MV3 扩展。安装后，在其他 HTTP/HTTPS 网页点击图片，会打开一个独立小窗，将该图片带入本地青叶科技试衣页面；小窗内仍需手动点击「开始试衣」。
 
 安装步骤：
 
@@ -55,13 +55,55 @@ Invoke-RestMethod http://localhost:8787/api/health
 
 没有 API Key 时，健康检查仍可用，但创建实时会话会返回明确配置错误；项目不会自动调用付费接口。
 
+## 诊断日志
+
+页面「诊断日志」区域会记录浏览器安全上下文、摄像头采集参数、信令/WebRTC 状态与错误，最多保留 300 条在当前浏览器本地；点击「导出诊断日志」可下载 JSON。日志不会包含摄像头视频、服装图片、信令正文或 API Key。请在出现问题的那台电脑上导出浏览器日志。
+
+后端与 Nginx 的结构化日志写入 Docker 标准输出，按容器分别查看：
+
+```powershell
+docker compose logs -f --tail=200 backend frontend
+```
+
+日志包含 Origin 拒绝原因、会话生命周期、供应商 WebSocket 状态和 Nginx 请求状态；Nginx 访问日志省略 URL 查询参数。Docker 每个服务最多保留 3 个、每个 10 MB 的日志文件。
+
+## 局域网 HTTPS 摄像头
+
+局域网 HTTP 页面可以浏览，但浏览器不提供摄像头 API。为本机局域网 IPv4 生成本地 CA 和 HTTPS 证书，并重启前端容器：
+
+```powershell
+.\scripts\setup-lan-https.ps1 -LanIp 192.168.1.9
+docker compose up -d --build frontend
+```
+
+脚本将服务器私钥与证书放在 Git 和 Docker build context 均排除的 `.certs` 目录，并输出 CA 的 SHA-256 指纹。使用另一台电脑打开 `http://192.168.1.9:5173/lan-ca.crt` 下载 CA 证书；导入前在两台电脑上分别运行 `Get-FileHash .\lan-ca.crt -Algorithm SHA256` 并核对指纹。确认一致后，在 Windows 证书安装向导中选择「当前用户」和「受信任的根证书颁发机构」，完成后重启浏览器。之后用 <https://192.168.1.9:5443> 访问并允许摄像头。HTTPS Origin 已加入本机 `.env`；如更换 IP 或端口，需同步更新证书和 `ALLOWED_ORIGINS`。
+
+如果浏览器访问 HTTPS 端口超时，请在管理员 PowerShell 放行 Private 网络中的本地子网：
+
+```powershell
+New-NetFirewallRule -DisplayName 'Anywear Demo HTTPS LAN TCP 5443' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5443 -RemoteAddress LocalSubnet -Profile Private
+```
+
+CA 证书仅用于本地演示；不要分享 `.certs/lan-server.key`，也不要将本地 CA 私钥备份到公开位置。
+
+## 服装目录分组
+
+服装目录由 `GARMENT_GROUPS_JSON` 定义，`GARMENT_LIBRARY_HOST_PATH` 指向本机服装库根目录。每个配置项的 `directory` 必须是根目录内的相对地址；后端递归发现 JPG、JPEG、PNG、WebP 并生成预览。精选组保留现有内置演示服装，其他目录各自成为一个可切换分页。Docker 将服装库以只读方式挂入后端。页面也可通过「选择图组目录」即时导入本机目录，但这是浏览器内临时图组，刷新后不保留；需要持久化的服务端图组仍应使用下方环境变量配置。
+
+```env
+GARMENT_LIBRARY_HOST_PATH=./garment-library
+GARMENT_GROUPS_JSON=[{"id":"summer","name":"夏季上衣","directory":"summer"},{"id":"hoodies","name":"卫衣","directory":"秋冬/卫衣","prompt":"Replace the current top with the garment shown in the reference image. Preserve the person, pose, face, hands, and background."}]
+```
+
+把图片放进配置的目录后重启后端或容器即可重新扫描。绝对路径和指向服装库外部的符号链接不会被读取。该服装目录默认被 Git 忽略，避免把个人/商品图片意外上传。
+
 ## Decart API Key 卡池
 
-后端支持通过 `DECART_API_KEYS` 配置多张 Key，使用逗号或换行分隔。每个实时会话启动时绑定一张 Key，优先选择当前活跃会话较少的 Key；活跃数相同时按轮询顺序分配。上游连接异常的 Key 会进入 `DECART_KEY_COOLDOWN_SECONDS` 指定的冷却期，避免连续击穿同一张卡。已有的单 Key 配置 `DECART_API_KEY` 仍然兼容。
+后端支持通过 `DECART_API_KEYS` 配置多张 Key，使用逗号或换行分隔；已有的单 Key 配置 `DECART_API_KEY` 也会并入卡池并去重。每个实时会话启动时绑定一张 Key，优先选择当前活跃会话较少的 Key；活跃数相同时按轮询顺序分配。`DECART_KEY_COOLDOWN_SECONDS` 默认为 `0`，表示故障 Key 不冷却、不会因失败被熔断；设置为正数才会暂时跳过故障 Key。会话内不会热切换；供应商错误仍会结束当前实时会话，下一次新建会话继续从卡池分配。
 
 ```powershell
 DECART_API_KEYS=key_a,key_b,key_c
-DECART_KEY_COOLDOWN_SECONDS=60
+DECART_KEY_COOLDOWN_SECONDS=0
 ```
 
 Key 只在后端通过环境变量读取，不返回浏览器、不写日志、不写入镜像层。一次 WebRTC 会话不会中途换 Key；要换卡需要停止并重新开始会话。
@@ -79,7 +121,7 @@ Key 只在后端通过环境变量读取，不返回浏览器、不写日志、�
 
 ## Docker 启动
 
-Docker 版本把前端和后端封装为两个容器：Nginx 只在本机 `127.0.0.1:5173` 提供页面，并反代 API 和 WebSocket；后端容器不直接暴露到宿主机。Decart API Key 通过 `.env` 注入，不会写入镜像层。
+Docker 版本把前端和后端封装为两个容器：Nginx 在 `5173` 端口提供页面，并反代 API 和 WebSocket；后端容器不直接暴露到宿主机。Decart API Key 通过 `.env` 注入，不会写入镜像层。
 
 ```powershell
 cd D:\workspace-hy\xinghua-策划\anywear-demo
@@ -88,13 +130,13 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 docker compose up --build
 ```
 
-然后打开 <http://127.0.0.1:5173>。停止容器：
+本机打开 <http://127.0.0.1:5173>；同一局域网的其他电脑可访问 `http://<本机局域网 IP>:5173` 浏览页面，但摄像头需 HTTPS 安全来源。停止容器：
 
 ```powershell
 docker compose down
 ```
 
-容器内后端监听 `0.0.0.0` 仅用于容器网络通信；宿主机入口仍绑定 `127.0.0.1`。Docker 化不会把模型变成本地模型，视频生成仍由 Decart 云端完成。
+容器内后端监听 `0.0.0.0` 仅用于容器网络通信；Docker 前端端口发布到宿主机所有网卡。Windows 防火墙需允许 Private 网络的本地子网访问 TCP `5173`。Docker 化不会把模型变成本地模型，视频生成仍由 Decart 云端完成。
 
 ## 效果筛选
 

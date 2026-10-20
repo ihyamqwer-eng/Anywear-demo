@@ -8,8 +8,19 @@ services:
     environment:
       HOST: 0.0.0.0
       PORT: 8787
+      GARMENT_LIBRARY_ROOT: /garment-library
+    volumes:
+      - type: bind
+        source: ${GARMENT_LIBRARY_HOST_PATH:-./garment-library}
+        target: /garment-library
+        read_only: true
     expose:
       - "8787"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 10s
@@ -25,4 +36,23 @@ services:
       backend:
         condition: service_healthy
     ports:
-      - "127.0.0.1:5173:80"
+      - "5173:80"
+      - "5443:443"
+    volumes:
+      - type: bind
+        source: ./.certs/lan-server.crt
+        target: /etc/nginx/certs/lan-server.crt
+        read_only: true
+      - type: bind
+        source: ./.certs/lan-server.key
+        target: /etc/nginx/certs/lan-server.key
+        read_only: true
+      - type: bind
+        source: ./.certs/lan-ca.crt
+        target: /etc/nginx/certs/lan-ca.crt
+        read_only: true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

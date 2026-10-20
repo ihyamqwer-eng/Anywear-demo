@@ -1,4 +1,5 @@
 import type { ProviderMessage, SessionResponse } from './types';
+import { logDiagnostic } from './diagnostics';
 
 const MAX_PENDING_SIGNAL_MESSAGES = 256;
 
@@ -54,14 +55,18 @@ export class RealtimeConnection {
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
     });
     this.ws = new WebSocket(websocketUrl(options.session.websocketPath));
+    logDiagnostic('info', 'realtime.created', { websocketOrigin: window.location.origin });
     this.bindPeerConnection();
     this.bindWebSocket();
   }
 
   private bindPeerConnection(): void {
     this.options.localStream.getTracks().forEach((track) => this.pc.addTrack(track, this.options.localStream));
+    this.pc.oniceconnectionstatechange = () => logDiagnostic('info', 'webrtc.ice-state', { state: this.pc.iceConnectionState });
+    this.pc.onicegatheringstatechange = () => logDiagnostic('info', 'webrtc.ice-gathering', { state: this.pc.iceGatheringState });
     this.pc.ontrack = (event) => {
       const stream = event.streams[0] ?? new MediaStream([event.track]);
+      logDiagnostic('info', 'webrtc.track-received', { kind: event.track.kind, readyState: event.track.readyState });
       this.options.onRemoteStream(stream);
     };
     this.pc.onicecandidate = (event) => {
@@ -127,6 +132,7 @@ export class RealtimeConnection {
   private bindWebSocket(): void {
     this.options.onSignalState('connecting');
     this.ws.onopen = async () => {
+      logDiagnostic('info', 'signaling.open');
       this.options.onSignalState('open');
       this.heartbeatTimer = window.setInterval(() => this.send({ type: 'heartbeat' }), 10_000);
       try {
@@ -142,15 +148,25 @@ export class RealtimeConnection {
     };
     this.ws.onmessage = (event) => {
       try {
-        void this.handleMessage(JSON.parse(String(event.data)) as ProviderMessage).catch((error: unknown) => {
+        const message = JSON.parse(String(event.data)) as ProviderMessage;
+        if (['answer', 'ice-restart', 'error', 'proxy_ready'].includes(message.type)) {
+          logDiagnostic(message.type === 'error' ? 'error' : 'info', 'signaling.message', { type: message.type });
+        }
+        void this.handleMessage(message).catch((error: unknown) => {
+          logDiagnostic('error', 'signaling.apply-failed', { message: error instanceof Error ? error.message : String(error) });
           this.options.onError(error instanceof Error ? error : new Error('Unable to apply signaling message'));
         });
       } catch (error) {
+        logDiagnostic('error', 'signaling.invalid-message', { message: error instanceof Error ? error.message : String(error) });
         this.options.onError(error instanceof Error ? error : new Error('Invalid signaling message'));
       }
     };
-    this.ws.onerror = () => this.options.onError(new Error('Signaling connection failed'));
-    this.ws.onclose = () => {
+    this.ws.onerror = () => {
+      logDiagnostic('error', 'signaling.error');
+      this.options.onError(new Error('Signaling connection failed'));
+    };
+    this.ws.onclose = (event) => {
+      logDiagnostic('warn', 'signaling.closed', { code: event.code });
       this.options.onSignalState('closed');
       if (!this.closed) this.options.onError(new Error('Signaling connection closed'));
     };
@@ -193,6 +209,7 @@ export class RealtimeConnection {
   }
 
   send(message: Record<string, unknown>, onSent?: () => void): boolean {
+    if (message.type !== 'heartbeat') logDiagnostic('info', 'signaling.send', { type: message.type });
     const serialized = JSON.stringify(message);
     if (this.ws.readyState === WebSocket.OPEN && (this.offerSent || message.type === 'offer')) {
       this.sendSerialized({ serialized, onSent });

@@ -1,4 +1,7 @@
 node_modules/
 dist/
 .env
+.certs/
 *.log
+garment-library/**
+!garment-library/.gitkeep
