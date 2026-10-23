@@ -16,7 +16,13 @@ import { SessionManager } from './session-manager.js';
 
 const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' } });
 const providerKeyStore = new ProviderKeyStore(config.providerKeyStorePath);
-const providerKeyPool = new ProviderKeyPool(providerKeyStore.load(config.providerKeys), config.providerKeyCooldownSeconds);
+const providerKeyConfiguration = providerKeyStore.loadConfiguration(config.providerKeys);
+const providerKeyPool = new ProviderKeyPool(
+  providerKeyConfiguration.keys,
+  config.providerKeyCooldownSeconds,
+  providerKeyConfiguration.groups,
+  providerKeyConfiguration.activeGroupId,
+);
 const sessions = new SessionManager(providerKeyPool, undefined, app.log as FastifyBaseLogger);
 const garmentLibrary = new GarmentLibrary();
 
@@ -90,7 +96,12 @@ async function requireLocalAdmin(request: FastifyRequest, reply: FastifyReply): 
 }
 
 function providerKeyManagementView() {
-  return { poolId: providerKeyPool.poolId, cards: providerKeyPool.getManagementStatus() };
+  return {
+    poolId: providerKeyPool.poolId,
+    cards: providerKeyPool.getAllManagementStatus(),
+    activeGroupId: providerKeyPool.activeProviderGroupId,
+    groups: providerKeyPool.getGroupsManagementStatus(),
+  };
 }
 
 await app.register(cors, { origin: config.allowedOrigins });
@@ -106,7 +117,7 @@ await app.register(fastifyStatic, {
 
 app.get('/api/health', async () => ({
   ok: true,
-  providerConfigured: providerKeyPool.size > 0,
+  providerConfigured: providerKeyPool.totalSize > 0,
   model: config.model,
   speed: config.speed,
   sessionTtlSeconds: config.sessionTtlSeconds,
@@ -115,7 +126,12 @@ app.get('/api/health', async () => ({
 
 app.get('/api/provider-keys', async (_request, reply) => {
   reply.header('Cache-Control', 'no-store');
-  return { poolId: providerKeyPool.poolId, cards: providerKeyPool.getStatus() };
+  return {
+    poolId: providerKeyPool.poolId,
+    groupId: providerKeyPool.activeProviderGroupId,
+    groupName: providerKeyPool.activeGroup.name,
+    cards: providerKeyPool.getStatus(),
+  };
 });
 
 app.get('/api/admin/provider-keys', { preHandler: requireLocalAdmin }, async (_request, reply) => {
@@ -123,25 +139,33 @@ app.get('/api/admin/provider-keys', { preHandler: requireLocalAdmin }, async (_r
   return providerKeyManagementView();
 });
 
-app.post<{ Body: { key?: unknown; label?: unknown } }>('/api/admin/provider-keys', { preHandler: requireLocalAdmin }, async (request, reply) => {
+app.post<{ Body: { key?: unknown; label?: unknown; groupId?: unknown } }>('/api/admin/provider-keys', { preHandler: requireLocalAdmin }, async (request, reply) => {
   const body = request.body;
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     return reply.code(400).send({ error: 'Request body must be an object', code: 'INVALID_REQUEST_BODY' });
   }
   const key = typeof body.key === 'string' ? body.key.trim() : '';
   const label = body.label === undefined ? undefined : typeof body.label === 'string' ? body.label.trim() : null;
+  const requestedGroupId = body.groupId;
   if (key.length < 8 || key.length > 4096 || /[\r\n\0]/.test(key)) {
     return reply.code(400).send({ error: 'API Key 格式无效', code: 'INVALID_PROVIDER_KEY' });
   }
   if (label === null || (label !== undefined && label.length > 80)) {
     return reply.code(400).send({ error: '卡片名称不能超过 80 个字符', code: 'INVALID_PROVIDER_KEY_LABEL' });
   }
+  if (requestedGroupId !== undefined && typeof requestedGroupId !== 'string') {
+    return reply.code(400).send({ error: '目标分组不存在', code: 'PROVIDER_GROUP_NOT_FOUND' });
+  }
 
   try {
     return await providerKeyStore.runExclusive(async () => {
+      const groupId = typeof requestedGroupId === 'string' ? requestedGroupId : providerKeyPool.activeProviderGroupId;
+      if (!providerKeyPool.getStoredGroups().some((group) => group.id === groupId)) {
+        return reply.code(400).send({ error: '目标分组不存在', code: 'PROVIDER_GROUP_NOT_FOUND' });
+      }
       let record;
       try {
-        record = providerKeyPool.prepareAdd(key, label || undefined);
+        record = providerKeyPool.prepareAdd(key, label || undefined, groupId);
       } catch (error) {
         const duplicate = error instanceof Error && error.message.includes('already in the pool');
         return reply.code(duplicate ? 409 : 400).send({
@@ -149,7 +173,8 @@ app.post<{ Body: { key?: unknown; label?: unknown } }>('/api/admin/provider-keys
           code: duplicate ? 'DUPLICATE_PROVIDER_KEY' : 'PROVIDER_KEY_POOL_FULL',
         });
       }
-      await providerKeyStore.save([...providerKeyPool.getStoredKeys(), record]);
+      const current = providerKeyPool.getStoredConfiguration();
+      await providerKeyStore.save({ ...current, keys: [...current.keys, record] });
       providerKeyPool.addRecord(record);
       reply.header('Cache-Control', 'no-store');
       return providerKeyManagementView();
@@ -172,13 +197,10 @@ app.patch<{ Params: { id: string }; Body: { enabled?: unknown } }>('/api/admin/p
       if (!record) return reply.code(404).send({ error: 'API Key 不存在', code: 'PROVIDER_KEY_NOT_FOUND' });
       if (record.enabled === enabled) return providerKeyManagementView();
 
+      const current = providerKeyPool.getStoredConfiguration();
+      const keys = current.keys.map((key) => key.id === record.id ? { ...key, enabled } : key);
+      await providerKeyStore.save({ ...current, keys });
       providerKeyPool.setEnabled(record.id, enabled);
-      try {
-        await providerKeyStore.save(providerKeyPool.getStoredKeys());
-      } catch {
-        providerKeyPool.setEnabled(record.id, record.enabled);
-        throw new Error('Provider key pool persistence failed');
-      }
       reply.header('Cache-Control', 'no-store');
       return providerKeyManagementView();
     });
@@ -194,19 +216,18 @@ app.delete<{ Params: { id: string } }>('/api/admin/provider-keys/:id', { preHand
       const currentKeys = providerKeyPool.getStoredKeys();
       const index = currentKeys.findIndex((key) => key.id === request.params.id);
       if (index < 0) return reply.code(404).send({ error: 'API Key 不存在', code: 'PROVIDER_KEY_NOT_FOUND' });
-      if (providerKeyPool.getStatus()[index]?.activeSessions) {
+      const record = currentKeys[index]!;
+      const cardStatus = providerKeyPool.getGroupsManagementStatus()
+        .flatMap((group) => group.cards)
+        .find((card) => card.id === record.id);
+      if (cardStatus?.activeSessions) {
         return reply.code(409).send({ error: '这张卡仍有运行中的会话，请停止会话后再移除', code: 'PROVIDER_KEY_IN_USE' });
       }
 
-      const record = currentKeys[index]!;
+      const current = providerKeyPool.getStoredConfiguration();
+      await providerKeyStore.save({ ...current, keys: current.keys.filter((key) => key.id !== record.id) });
       if (!providerKeyPool.remove(record.id)) {
         return reply.code(409).send({ error: '卡池状态已变化，请刷新后重试', code: 'PROVIDER_KEY_IN_USE' });
-      }
-      try {
-        await providerKeyStore.save(providerKeyPool.getStoredKeys());
-      } catch {
-        providerKeyPool.restore(record, index);
-        throw new Error('Provider key pool persistence failed');
       }
       reply.header('Cache-Control', 'no-store');
       return providerKeyManagementView();
@@ -214,6 +235,145 @@ app.delete<{ Params: { id: string } }>('/api/admin/provider-keys/:id', { preHand
   } catch (error) {
     request.log.error({ event: 'provider_key.persist_failed', errorName: error instanceof Error ? error.name : typeof error }, 'Provider key pool persistence failed');
     return reply.code(500).send({ error: '卡池保存失败，请检查本机数据目录权限', code: 'PROVIDER_KEY_SAVE_FAILED' });
+  }
+});
+
+app.post<{ Body: { name?: unknown } }>('/api/admin/provider-key-groups', { preHandler: requireLocalAdmin }, async (request, reply) => {
+  const body = request.body;
+  const name = body && typeof body === 'object' && !Array.isArray(body) && typeof body.name === 'string'
+    ? body.name.trim()
+    : '';
+  if (!name || name.length > 80) {
+    return reply.code(400).send({ error: '分组名称需为 1 到 80 个字符', code: 'INVALID_PROVIDER_GROUP_NAME' });
+  }
+  try {
+    return await providerKeyStore.runExclusive(async () => {
+      let group;
+      try {
+        group = providerKeyPool.prepareCreateGroup(name);
+      } catch (error) {
+        const duplicate = error instanceof Error && error.message.includes('already exists');
+        const full = error instanceof Error && error.message.includes('more than 50');
+        return reply.code(duplicate ? 409 : 400).send({
+          error: duplicate ? '已存在同名分组' : full ? '分组数量已达上限（50）' : '无法创建分组',
+          code: duplicate ? 'DUPLICATE_PROVIDER_GROUP' : full ? 'PROVIDER_GROUP_LIMIT' : 'INVALID_PROVIDER_GROUP_NAME',
+        });
+      }
+      const current = providerKeyPool.getStoredConfiguration();
+      await providerKeyStore.save({
+        ...current,
+        activeGroupId: group.id,
+        groups: [...current.groups, group],
+      });
+      providerKeyPool.addGroup(group, true);
+      reply.header('Cache-Control', 'no-store');
+      return reply.code(201).send(providerKeyManagementView());
+    });
+  } catch (error) {
+    request.log.error({ event: 'provider_key.persist_failed', errorName: error instanceof Error ? error.name : typeof error }, 'Provider key group persistence failed');
+    return reply.code(500).send({ error: '分组保存失败，请检查本机数据目录权限', code: 'PROVIDER_KEY_SAVE_FAILED' });
+  }
+});
+
+app.patch<{ Params: { id: string }; Body: { name?: unknown } }>('/api/admin/provider-key-groups/:id', { preHandler: requireLocalAdmin }, async (request, reply) => {
+  const body = request.body;
+  const name = body && typeof body === 'object' && !Array.isArray(body) && typeof body.name === 'string'
+    ? body.name.trim()
+    : '';
+  if (!name || name.length > 80) {
+    return reply.code(400).send({ error: '分组名称需为 1 到 80 个字符', code: 'INVALID_PROVIDER_GROUP_NAME' });
+  }
+  try {
+    return await providerKeyStore.runExclusive(async () => {
+      const current = providerKeyPool.getStoredConfiguration();
+      const groupIndex = current.groups.findIndex((group) => group.id === request.params.id);
+      if (groupIndex < 0) return reply.code(404).send({ error: '分组不存在', code: 'PROVIDER_GROUP_NOT_FOUND' });
+      if (current.groups.some((group) => group.id !== request.params.id && group.name.toLowerCase() === name.toLowerCase())) {
+        return reply.code(409).send({ error: '已存在同名分组', code: 'DUPLICATE_PROVIDER_GROUP' });
+      }
+      if (current.groups[groupIndex]!.name === name) return providerKeyManagementView();
+      const groups = current.groups.map((group) => group.id === request.params.id ? { ...group, name } : group);
+      await providerKeyStore.save({ ...current, groups });
+      providerKeyPool.renameGroup(request.params.id, name);
+      reply.header('Cache-Control', 'no-store');
+      return providerKeyManagementView();
+    });
+  } catch (error) {
+    request.log.error({ event: 'provider_key.persist_failed', errorName: error instanceof Error ? error.name : typeof error }, 'Provider key group persistence failed');
+    return reply.code(500).send({ error: '分组保存失败，请检查本机数据目录权限', code: 'PROVIDER_KEY_SAVE_FAILED' });
+  }
+});
+
+app.delete<{ Params: { id: string } }>('/api/admin/provider-key-groups/:id', { preHandler: requireLocalAdmin }, async (request, reply) => {
+  try {
+    return await providerKeyStore.runExclusive(async () => {
+      const current = providerKeyPool.getStoredConfiguration();
+      const group = current.groups.find((entry) => entry.id === request.params.id);
+      if (!group) return reply.code(404).send({ error: '分组不存在', code: 'PROVIDER_GROUP_NOT_FOUND' });
+      if (group.id === providerKeyPool.activeProviderGroupId) {
+        return reply.code(409).send({ error: '请先启用其他分组，再删除当前分组', code: 'ACTIVE_PROVIDER_GROUP_CANNOT_DELETE' });
+      }
+      if (current.keys.some((key) => key.groupId === group.id)) {
+        return reply.code(409).send({ error: '请先移出或删除分组内的 API 卡', code: 'PROVIDER_GROUP_NOT_EMPTY' });
+      }
+      await providerKeyStore.save({ ...current, groups: current.groups.filter((entry) => entry.id !== group.id) });
+      providerKeyPool.removeGroup(group.id);
+      reply.header('Cache-Control', 'no-store');
+      return providerKeyManagementView();
+    });
+  } catch (error) {
+    request.log.error({ event: 'provider_key.persist_failed', errorName: error instanceof Error ? error.name : typeof error }, 'Provider key group persistence failed');
+    return reply.code(500).send({ error: '分组保存失败，请检查本机数据目录权限', code: 'PROVIDER_KEY_SAVE_FAILED' });
+  }
+});
+
+app.post<{ Params: { id: string } }>('/api/admin/provider-key-groups/:id/activate', { preHandler: requireLocalAdmin }, async (request, reply) => {
+  try {
+    return await providerKeyStore.runExclusive(async () => {
+      if (!providerKeyPool.getStoredGroups().some((group) => group.id === request.params.id)) {
+        return reply.code(404).send({ error: '分组不存在', code: 'PROVIDER_GROUP_NOT_FOUND' });
+      }
+      if (providerKeyPool.activeProviderGroupId !== request.params.id) {
+        const current = providerKeyPool.getStoredConfiguration();
+        await providerKeyStore.save({ ...current, activeGroupId: request.params.id });
+        providerKeyPool.activateGroup(request.params.id);
+      }
+      reply.header('Cache-Control', 'no-store');
+      return providerKeyManagementView();
+    });
+  } catch (error) {
+    request.log.error({ event: 'provider_key.persist_failed', errorName: error instanceof Error ? error.name : typeof error }, 'Provider key group activation persistence failed');
+    return reply.code(500).send({ error: '分组启用失败，请检查本机数据目录权限', code: 'PROVIDER_KEY_SAVE_FAILED' });
+  }
+});
+
+app.patch<{ Params: { id: string }; Body: { groupId?: unknown } }>('/api/admin/provider-keys/:id/group', { preHandler: requireLocalAdmin }, async (request, reply) => {
+  const groupId = request.body?.groupId;
+  if (typeof groupId !== 'string') {
+    return reply.code(400).send({ error: 'groupId 必须是分组 ID', code: 'INVALID_PROVIDER_GROUP' });
+  }
+  try {
+    return await providerKeyStore.runExclusive(async () => {
+      const current = providerKeyPool.getStoredConfiguration();
+      const key = current.keys.find((entry) => entry.id === request.params.id);
+      if (!key) return reply.code(404).send({ error: 'API Key 不存在', code: 'PROVIDER_KEY_NOT_FOUND' });
+      if (!current.groups.some((group) => group.id === groupId)) {
+        return reply.code(404).send({ error: '目标分组不存在', code: 'PROVIDER_GROUP_NOT_FOUND' });
+      }
+      if (key.groupId === groupId) return providerKeyManagementView();
+      const card = providerKeyPool.getGroupsManagementStatus().flatMap((group) => group.cards).find((entry) => entry.id === key.id);
+      if (card?.activeSessions) {
+        return reply.code(409).send({ error: '这张卡仍有运行中的会话，结束后才能移动分组', code: 'PROVIDER_KEY_IN_USE' });
+      }
+      const keys = current.keys.map((entry) => entry.id === key.id ? { ...entry, groupId } : entry);
+      await providerKeyStore.save({ ...current, keys });
+      providerKeyPool.move(key.id, groupId);
+      reply.header('Cache-Control', 'no-store');
+      return providerKeyManagementView();
+    });
+  } catch (error) {
+    request.log.error({ event: 'provider_key.persist_failed', errorName: error instanceof Error ? error.name : typeof error }, 'Provider key group move persistence failed');
+    return reply.code(500).send({ error: 'API 卡移动失败，请检查本机数据目录权限', code: 'PROVIDER_KEY_SAVE_FAILED' });
   }
 });
 
@@ -228,36 +388,46 @@ app.get<{ Params: { imageId: string } }>('/api/garment-images/:imageId', async (
 });
 
 app.post<{ Body: { providerKeyId?: unknown; poolId?: unknown } }>('/api/sessions', { preHandler: requireAllowedOrigin }, async (request, reply) => {
-  if (providerKeyPool.size === 0) {
-    return reply.code(503).send({
-      error: 'DECART_API_KEY is not configured',
-      code: 'PROVIDER_NOT_CONFIGURED',
-    });
-  }
+  return providerKeyStore.runExclusive(async () => {
+    if (providerKeyPool.totalSize === 0) {
+      return reply.code(503).send({
+        error: 'DECART_API_KEY is not configured',
+        code: 'PROVIDER_NOT_CONFIGURED',
+      });
+    }
 
-  const body = request.body ?? {};
-  if (typeof body !== 'object' || Array.isArray(body)) {
-    return reply.code(400).send({ error: 'Request body must be an object', code: 'INVALID_REQUEST_BODY' });
-  }
-  const requestedProviderKeyId = body.providerKeyId;
-  if (requestedProviderKeyId !== undefined
-    && (typeof requestedProviderKeyId !== 'string' || !providerKeyPool.has(requestedProviderKeyId))) {
-    return reply.code(400).send({ error: 'Provider key selection is invalid', code: 'INVALID_PROVIDER_KEY' });
-  }
-  if (requestedProviderKeyId !== undefined && body.poolId !== providerKeyPool.poolId) {
-    return reply.code(409).send({ error: '卡池已更新，请重新进入卡池页面选择卡号', code: 'PROVIDER_POOL_CHANGED' });
-  }
+    const body = request.body ?? {};
+    if (typeof body !== 'object' || Array.isArray(body)) {
+      return reply.code(400).send({ error: 'Request body must be an object', code: 'INVALID_REQUEST_BODY' });
+    }
+    const requestedProviderKeyId = body.providerKeyId;
+    if (requestedProviderKeyId !== undefined && typeof requestedProviderKeyId !== 'string') {
+      return reply.code(400).send({ error: 'Provider key selection is invalid', code: 'INVALID_PROVIDER_KEY' });
+    }
+    if (requestedProviderKeyId !== undefined && body.poolId !== providerKeyPool.poolId) {
+      return reply.code(409).send({ error: '卡池已更新，请重新进入卡池页面选择卡号', code: 'PROVIDER_POOL_CHANGED' });
+    }
+    if (typeof requestedProviderKeyId === 'string' && !providerKeyPool.has(requestedProviderKeyId)) {
+      return reply.code(400).send({ error: 'Provider key selection is invalid', code: 'INVALID_PROVIDER_KEY' });
+    }
+    if (providerKeyPool.size === 0) {
+      return reply.code(503).send({
+        error: '当前启用分组没有可用的 API 卡',
+        code: 'ACTIVE_PROVIDER_GROUP_EMPTY',
+      });
+    }
 
-  const session = sessions.create(requestedProviderKeyId as string | undefined);
-  if (!session) {
-    return reply.code(503).send({
-      error: requestedProviderKeyId ? '所选 API 卡当前不可用，请刷新卡池或选择其他卡' : '当前没有可用的 API 卡',
-      code: 'PROVIDER_KEY_UNAVAILABLE',
+    const session = sessions.create(requestedProviderKeyId as string | undefined);
+    if (!session) {
+      return reply.code(503).send({
+        error: requestedProviderKeyId ? '所选 API 卡当前不可用，请刷新卡池或选择其他卡' : '当前启用分组没有可用的 API 卡',
+        code: 'PROVIDER_KEY_UNAVAILABLE',
+      });
+    }
+    return reply.code(201).send({
+      ...session,
+      websocketPath: `/ws/realtime?session_id=${encodeURIComponent(session.sessionId)}`,
     });
-  }
-  return reply.code(201).send({
-    ...session,
-    websocketPath: `/ws/realtime?session_id=${encodeURIComponent(session.sessionId)}`,
   });
 });
 

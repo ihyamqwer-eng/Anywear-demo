@@ -95,6 +95,130 @@ test('keeps key IDs stable across removal and never reuses removed IDs', () => {
   assert.equal(pool.has('provider-key-1'), false);
 });
 
+test('isolates allocation by active group and releases sessions against their original keys', () => {
+  const groups = [
+    { id: 'provider-group-default', name: '默认分组' },
+    { id: 'provider-group-secondary', name: '备用分组' },
+  ];
+  const pool = new ProviderKeyPool([
+    { id: 'provider-key-1', value: 'placeholder-default-key', label: 'Default', enabled: true, groupId: groups[0]!.id },
+    { id: 'provider-key-2', value: 'placeholder-secondary-key-a', label: 'Secondary A', enabled: true, groupId: groups[1]!.id },
+    { id: 'provider-key-3', value: 'placeholder-secondary-key-b', label: 'Secondary B', enabled: true, groupId: groups[1]!.id },
+  ], 0, groups, groups[0]!.id);
+
+  const defaultLease = pool.acquire();
+  assert.equal(defaultLease?.id, 'provider-key-1');
+  const defaultPoolId = pool.poolId;
+  assert.equal(pool.activateGroup(groups[1]!.id), true);
+  assert.notEqual(pool.poolId, defaultPoolId);
+  assert.deepEqual(pool.getStatus().map((card) => card.id), ['provider-key-2', 'provider-key-3']);
+  assert.equal(pool.acquire('provider-key-1'), null);
+
+  const secondaryLease = pool.acquire();
+  assert.equal(secondaryLease?.id, 'provider-key-2');
+  const secondSecondaryLease = pool.acquire();
+  assert.equal(secondSecondaryLease?.id, 'provider-key-3');
+  assert.equal(pool.activateGroup(groups[0]!.id), true);
+  assert.deepEqual(pool.getGroupsManagementStatus().map((group) => group.activeSessions), [1, 2]);
+  pool.release(defaultLease!.id);
+  pool.release(secondaryLease!.id);
+  pool.release(secondSecondaryLease!.id);
+  assert.deepEqual(pool.getGroupsManagementStatus().map((group) => group.activeSessions), [0, 0]);
+});
+
+test('keeps automatic rotation cursors independent when switching provider groups', () => {
+  const groups = [
+    { id: 'provider-group-a', name: 'A' },
+    { id: 'provider-group-b', name: 'B' },
+  ];
+  const pool = new ProviderKeyPool([
+    { id: 'provider-key-1', value: 'placeholder-a-1', label: 'A1', enabled: true, groupId: groups[0]!.id },
+    { id: 'provider-key-2', value: 'placeholder-a-2', label: 'A2', enabled: true, groupId: groups[0]!.id },
+    { id: 'provider-key-3', value: 'placeholder-b-1', label: 'B1', enabled: true, groupId: groups[1]!.id },
+    { id: 'provider-key-4', value: 'placeholder-b-2', label: 'B2', enabled: true, groupId: groups[1]!.id },
+    { id: 'provider-key-5', value: 'placeholder-b-3', label: 'B3', enabled: true, groupId: groups[1]!.id },
+  ], 0, groups, groups[0]!.id);
+
+  const firstA = pool.acquire();
+  assert.equal(firstA?.id, 'provider-key-1');
+  pool.release(firstA!.id);
+
+  pool.activateGroup(groups[1]!.id);
+  const firstB = pool.acquire();
+  assert.equal(firstB?.id, 'provider-key-3');
+  pool.release(firstB!.id);
+
+  pool.activateGroup(groups[0]!.id);
+  const secondA = pool.acquire();
+  assert.equal(secondA?.id, 'provider-key-2');
+  pool.release(secondA!.id);
+
+  pool.activateGroup(groups[1]!.id);
+  const secondB = pool.acquire();
+  assert.equal(secondB?.id, 'provider-key-4');
+  pool.release(secondB!.id);
+
+  pool.activateGroup(groups[0]!.id);
+  const selectedA = pool.acquire('provider-key-1');
+  assert.equal(selectedA?.id, 'provider-key-1');
+  pool.release(selectedA!.id);
+
+  pool.activateGroup(groups[1]!.id);
+  const thirdB = pool.acquire();
+  assert.equal(thirdB?.id, 'provider-key-5');
+  pool.release(thirdB!.id);
+
+  pool.activateGroup(groups[0]!.id);
+  const nextA = pool.acquire();
+  assert.equal(nextA?.id, 'provider-key-2');
+  pool.release(nextA!.id);
+});
+
+test('advances rotation when the next key is removed', () => {
+  const pool = new ProviderKeyPool(['placeholder-remove-a', 'placeholder-remove-b', 'placeholder-remove-c'], 0);
+  const first = pool.acquire();
+  assert.equal(first?.id, 'provider-key-1');
+  pool.release(first!.id);
+
+  assert.equal(pool.remove('provider-key-2'), true);
+  const next = pool.acquire();
+  assert.equal(next?.id, 'provider-key-3');
+  pool.release(next!.id);
+});
+
+test('advances rotation when the next key moves to another group', () => {
+  const groups = [
+    { id: 'provider-group-move-a', name: 'A' },
+    { id: 'provider-group-move-b', name: 'B' },
+  ];
+  const pool = new ProviderKeyPool([
+    { id: 'provider-key-1', value: 'placeholder-move-a-1', label: 'A1', enabled: true, groupId: groups[0]!.id },
+    { id: 'provider-key-2', value: 'placeholder-move-a-2', label: 'A2', enabled: true, groupId: groups[0]!.id },
+    { id: 'provider-key-3', value: 'placeholder-move-a-3', label: 'A3', enabled: true, groupId: groups[0]!.id },
+    { id: 'provider-key-4', value: 'placeholder-move-b-1', label: 'B1', enabled: true, groupId: groups[1]!.id },
+  ], 0, groups, groups[0]!.id);
+  const first = pool.acquire();
+  assert.equal(first?.id, 'provider-key-1');
+  pool.release(first!.id);
+
+  assert.equal(pool.move('provider-key-2', groups[1]!.id), true);
+  const next = pool.acquire();
+  assert.equal(next?.id, 'provider-key-3');
+  pool.release(next!.id);
+});
+
+test('never assigns a disabled key when another key in the active group is enabled', () => {
+  const group = { id: 'provider-group-enabled', name: 'Enabled group' };
+  const pool = new ProviderKeyPool([
+    { id: 'provider-key-1', value: 'placeholder-disabled-key', label: 'Disabled', enabled: false, groupId: group.id },
+    { id: 'provider-key-2', value: 'placeholder-enabled-key', label: 'Enabled', enabled: true, groupId: group.id },
+  ], 0, [group], group.id);
+
+  const lease = pool.acquire();
+  assert.equal(lease?.id, 'provider-key-2');
+  pool.release(lease!.id);
+});
+
 test('uses the manually selected key for the upstream WebSocket connection', async (context) => {
   const httpServer = createServer();
   const upstreamServer = new WebSocketServer({ server: httpServer, path: '/v1/stream' });

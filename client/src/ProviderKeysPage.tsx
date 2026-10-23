@@ -9,6 +9,7 @@ function ProviderKeysPage() {
   const [cards, setCards] = useState<ProviderKeyCard[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(() => getSelectedProviderKeySelection()?.providerKeyId ?? null);
   const [poolId, setPoolId] = useState('');
+  const [groupName, setGroupName] = useState('默认分组');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [selectionNotice, setSelectionNotice] = useState('');
@@ -23,6 +24,7 @@ function ProviderKeysPage() {
         && pool.cards.some((card) => card.id === savedSelection.providerKeyId);
       setCards(pool.cards);
       setPoolId(pool.poolId);
+      setGroupName(pool.groupName || '默认分组');
       setSelectedId(selectionIsValid ? savedSelection.providerKeyId : null);
       if (!selectionIsValid && savedSelection) {
         saveSelectedProviderKeySelection(null);
@@ -86,7 +88,7 @@ function ProviderKeysPage() {
         <div className="provider-page-heading">
           <span className="panel-kicker">PROVIDER ROUTING</span>
           <h2 id="provider-page-title">API 卡池</h2>
-          <p>{loading ? '正在读取卡池状态' : `${cards.length} 张卡已配置`}</p>
+          <p>{loading ? '正在读取卡池状态' : `${cards.length} 张卡已配置 · 当前分组：${groupName}`}</p>
         </div>
 
         <div className="provider-current-selection" role="status">

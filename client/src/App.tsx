@@ -16,8 +16,12 @@ import {
   ImagePlus,
   KeyRound,
   LoaderCircle,
+  Minimize2,
+  Monitor,
   PictureInPicture2,
   RefreshCw,
+  Shirt,
+  Smartphone,
   SlidersHorizontal,
   Wifi,
   WifiOff,
@@ -93,6 +97,7 @@ function garmentNameFromFile(fileName: string): string {
 }
 
 function App() {
+  const workspaceRef = useRef<HTMLDivElement>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
@@ -107,6 +112,8 @@ function App() {
   const garmentTimeoutRef = useRef<number | undefined>(undefined);
   const garmentsRef = useRef<Garment[]>([]);
   const localDirectoryGroupsRef = useRef<GarmentGroup[]>([]);
+  const cameraRequestRef = useRef(0);
+  const cameraOpenPromiseRef = useRef<Promise<MediaStream> | null>(null);
   const [garments, setGarments] = useState<Garment[]>([]);
   const [garmentGroups, setGarmentGroups] = useState<GarmentGroup[]>([]);
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
@@ -115,10 +122,12 @@ function App() {
   const [pendingGarmentId, setPendingGarmentId] = useState<string | null>(null);
   const [queuedGarmentId, setQueuedGarmentId] = useState<string | null>(null);
   const [status, setStatus] = useState<ViewStatus>('idle');
+  const [cameraPreviewState, setCameraPreviewState] = useState<'closed' | 'opening' | 'open'>('closed');
   const [sessionState, setSessionState] = useState<SessionState>('idle');
   const [message, setMessage] = useState('');
   const [usageSeconds, setUsageSeconds] = useState(0);
   const [remoteReady, setRemoteReady] = useState(false);
+  const [viewOrientation, setViewOrientation] = useState<'landscape' | 'portrait'>('landscape');
   const [cameraSize, setCameraSize] = useState<{ width: number; height: number } | null>(null);
   const [remoteSize, setRemoteSize] = useState<{ width: number; height: number } | null>(null);
   const [mediaStats, setMediaStats] = useState<RealtimeMediaStats | null>(null);
@@ -173,15 +182,103 @@ function App() {
   }, []);
 
   const releaseMedia = useCallback(() => {
+    cameraRequestRef.current += 1;
+    cameraOpenPromiseRef.current = null;
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
     localStreamRef.current = null;
     if (localVideoRef.current) localVideoRef.current.srcObject = null;
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+    setCameraPreviewState('closed');
     setRemoteReady(false);
     setCameraSize(null);
     setRemoteSize(null);
     setMediaStats(null);
   }, []);
+
+  const openCameraPreview = useCallback(async () => {
+    const activeStream = localStreamRef.current;
+    if (activeStream?.getVideoTracks().some((track) => track.readyState === 'live')) return activeStream;
+    if (cameraOpenPromiseRef.current) return cameraOpenPromiseRef.current;
+
+    const requestId = ++cameraRequestRef.current;
+    setCameraPreviewState('opening');
+    setMessage('');
+    const opening = (async () => {
+      logDiagnostic('info', 'camera.preview.requested', {
+        ...getBrowserDiagnosticContext(),
+        captureProfile: captureProfile.id,
+        frameRate,
+        cameraSelection: cameraDeviceId ? 'specific' : 'default',
+      });
+      if (!window.isSecureContext) {
+        throw new Error('当前页面不在安全上下文中，浏览器不会开放摄像头。请使用 HTTPS 或本机地址访问。');
+      }
+      if (typeof navigator.mediaDevices?.getUserMedia !== 'function') {
+        throw new Error('当前浏览器未提供摄像头接口，请使用最新版 Chrome 并确认摄像头权限。');
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          ...(cameraDeviceId ? { deviceId: { exact: cameraDeviceId } } : {}),
+          width: { ideal: captureProfile.width, max: captureProfile.width },
+          height: { ideal: captureProfile.height, max: captureProfile.height },
+          frameRate: { ideal: frameRate, max: frameRate },
+        },
+        audio: false,
+      });
+      if (requestId !== cameraRequestRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        throw new Error('摄像头预览已取消');
+      }
+      localStreamRef.current = stream;
+      void refreshCameraDevices();
+      const cameraSettings = stream.getVideoTracks()[0]?.getSettings();
+      logDiagnostic('info', 'camera.preview.opened', {
+        width: cameraSettings?.width ?? null,
+        height: cameraSettings?.height ?? null,
+        frameRate: cameraSettings?.frameRate ?? null,
+        facingMode: cameraSettings?.facingMode ?? null,
+        selectedDevice: cameraDeviceId ? 'specific' : 'default',
+      });
+      if (cameraSettings?.width && cameraSettings.height) setCameraSize({ width: cameraSettings.width, height: cameraSettings.height });
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+        await localVideoRef.current.play().catch(() => undefined);
+      }
+      setCameraPreviewState('open');
+      setSessionState('camera_ready');
+      return stream;
+    })();
+    cameraOpenPromiseRef.current = opening;
+    try {
+      return await opening;
+    } catch (error) {
+      if (requestId === cameraRequestRef.current) {
+        setCameraPreviewState('closed');
+        setMessage(error instanceof Error ? error.message : String(error));
+        logDiagnostic('error', 'camera.preview.failed', {
+          name: error instanceof Error ? error.name : typeof error,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+      throw error;
+    } finally {
+      if (cameraOpenPromiseRef.current === opening) cameraOpenPromiseRef.current = null;
+    }
+  }, [cameraDeviceId, captureProfile, frameRate, refreshCameraDevices]);
+
+  const closeCameraPreview = useCallback(() => {
+    if (sessionIdRef.current) return;
+    lifecycleRef.current += 1;
+    logDiagnostic('info', 'camera.preview.closed', {});
+    releaseMedia();
+    setSessionState('idle');
+    setMessage('');
+  }, [releaseMedia]);
+
+  const toggleCameraPreview = () => {
+    if (cameraPreviewState === 'open') closeCameraPreview();
+    else void openCameraPreview().catch(() => undefined);
+  };
 
   const teardown = useCallback(async (finalStatus: ViewStatus) => {
     const lifecycle = ++lifecycleRef.current;
@@ -375,40 +472,8 @@ function App() {
         maxVideoBitrate,
         cameraSelection: cameraDeviceId ? 'specific' : 'default',
       });
-      if (!window.isSecureContext) {
-        throw new Error('当前通过 HTTP 局域网地址访问，浏览器不会开放摄像头。请将演示站配置为 HTTPS 后再试。');
-      }
-      if (typeof navigator.mediaDevices?.getUserMedia !== 'function') {
-        throw new Error('当前浏览器未提供摄像头接口，请使用最新版 Chrome 并确认摄像头权限。');
-      }
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          ...(cameraDeviceId ? { deviceId: { exact: cameraDeviceId } } : {}),
-          width: { ideal: captureProfile.width, max: captureProfile.width },
-          height: { ideal: captureProfile.height, max: captureProfile.height },
-          frameRate: { ideal: frameRate, max: frameRate },
-        },
-        audio: false,
-      });
-      if (lifecycle !== lifecycleRef.current) {
-        stream.getTracks().forEach((track) => track.stop());
-        return;
-      }
-      localStreamRef.current = stream;
-      void refreshCameraDevices();
-      const cameraSettings = stream.getVideoTracks()[0]?.getSettings();
-      logDiagnostic('info', 'camera.opened', {
-        width: cameraSettings.width ?? null,
-        height: cameraSettings.height ?? null,
-        frameRate: cameraSettings.frameRate ?? null,
-        facingMode: cameraSettings.facingMode ?? null,
-        selectedDevice: cameraDeviceId ? 'specific' : 'default',
-      });
-      if (cameraSettings.width && cameraSettings.height) setCameraSize({ width: cameraSettings.width, height: cameraSettings.height });
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-        await localVideoRef.current.play().catch(() => undefined);
-      }
+      const stream = localStreamRef.current ?? await openCameraPreview();
+      if (lifecycle !== lifecycleRef.current) return;
       const session = await createSession(getSelectedProviderKeySelection());
       ownedSessionId = session.sessionId;
       if (lifecycle !== lifecycleRef.current) {
@@ -510,7 +575,7 @@ function App() {
         showError(error);
       }
     }
-  }, [cameraDeviceId, captureProfile, failSession, frameRate, isCompactWindow, maxVideoBitrate, refreshCameraDevices, releaseMedia, selectGarment, showError, status, stop]);
+  }, [cameraDeviceId, captureProfile, failSession, frameRate, isCompactWindow, maxVideoBitrate, openCameraPreview, releaseMedia, selectGarment, showError, status, stop]);
 
   useEffect(() => {
     const queuedGarment = queuedGarmentRef.current;
@@ -568,12 +633,15 @@ function App() {
 
   useEffect(() => {
     const onVisibility = () => {
-      if (document.hidden && sessionIdRef.current) void stop('页面隐藏');
+      if (!document.hidden) return;
+      if (sessionIdRef.current || status === 'starting') void stop('页面隐藏');
+      else if (localStreamRef.current || cameraOpenPromiseRef.current) closeCameraPreview();
     };
     const onPageHide = () => {
-      if (sessionIdRef.current) void stop('页面离开');
+      if (sessionIdRef.current || status === 'starting') void stop('页面离开');
+      else if (localStreamRef.current || cameraOpenPromiseRef.current) closeCameraPreview();
     };
-    const onFullscreen = () => setIsFullscreen(Boolean(document.fullscreenElement));
+    const onFullscreen = () => setIsFullscreen(document.fullscreenElement === workspaceRef.current);
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('pagehide', onPageHide);
     document.addEventListener('fullscreenchange', onFullscreen);
@@ -582,7 +650,7 @@ function App() {
       window.removeEventListener('pagehide', onPageHide);
       document.removeEventListener('fullscreenchange', onFullscreen);
     };
-  }, [stop]);
+  }, [closeCameraPreview, status, stop]);
 
   useEffect(() => {
     if (!connectionRef.current || !sessionIdRef.current || status === 'idle' || status === 'stopped' || status === 'error') return;
@@ -618,7 +686,7 @@ function App() {
 
   const toggleFullscreen = async () => {
     if (document.fullscreenElement) await document.exitFullscreen();
-    else await document.documentElement.requestFullscreen();
+    else await workspaceRef.current?.requestFullscreen();
   };
 
   const openCompactWindow = () => {
@@ -644,6 +712,8 @@ function App() {
   const visibleGarments = activeGroup?.garments.slice(currentPage * garmentsPerPage, (currentPage + 1) * garmentsPerPage) ?? [];
   const canStart = status !== 'starting' && status !== 'live' && status !== 'switching';
   const isRunning = status === 'starting' || status === 'live' || status === 'switching';
+  const cameraPreviewActive = cameraPreviewState === 'open';
+  const cameraSettingsLocked = isRunning || cameraPreviewState !== 'closed';
   return (
     <main className={`mirror-shell ${isCompactWindow ? 'compact-shell' : ''}`}>
       <header className="topbar">
@@ -656,21 +726,18 @@ function App() {
           </div>
         </div>
         <div className="top-actions">
-          <div className={`connection-pill ${status}`} role="status" aria-label={statusLabels[status]}><span className="status-dot" /><span className="connection-label">{statusLabels[status]}</span></div>
+          <div className={`connection-pill ${cameraPreviewActive && !isRunning ? 'preview' : status}`} role="status" aria-label={cameraPreviewActive && !isRunning ? '摄像头预览' : statusLabels[status]}><span className="status-dot" /><span className="connection-label">{cameraPreviewActive && !isRunning ? '摄像头预览' : statusLabels[status]}</span></div>
           <button className="icon-button" type="button" onClick={() => window.location.assign(`/cards${isCompactWindow ? '?compact=1' : ''}`)} disabled={isRunning} aria-label="打开 API 卡池" title={isRunning ? '停止当前会话后管理卡池' : 'API 卡池'}>
             <KeyRound size={17} />
           </button>
           {!isCompactWindow && <button className="icon-button" type="button" onClick={openCompactWindow} aria-label="打开小窗模式" title="打开小窗模式">
             <PictureInPicture2 size={18} />
           </button>}
-          <button className="icon-button" type="button" onClick={toggleFullscreen} aria-label={isFullscreen ? '退出全屏' : '进入全屏'} title={isFullscreen ? '退出全屏' : '进入全屏'}>
-            <Expand size={18} />
-          </button>
         </div>
       </header>
 
-      <div className="workspace">
-        <section className="preview-column" aria-label="实时试衣画面">
+      <div className="workspace" ref={workspaceRef}>
+        <section className={`preview-column ${viewOrientation === 'portrait' ? 'is-portrait' : ''}`} aria-label="实时试衣画面">
           <div className="video-frame">
             <video ref={localVideoRef} className="video-layer local-video" autoPlay muted playsInline onLoadedMetadata={(event) => {
               if (event.currentTarget.videoWidth && event.currentTarget.videoHeight) setCameraSize({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight });
@@ -683,7 +750,7 @@ function App() {
             }} />
             <div className="stage-shade" />
 
-            {!remoteReady && (
+            {!remoteReady && !cameraPreviewActive && (
               <div className="stage-message">
                 {status === 'starting' ? <LoaderCircle className="spin" size={34} /> : status === 'error' ? <AlertCircle size={34} /> : <Camera size={34} />}
                 <strong>{status === 'error' ? '连接未完成' : status === 'starting' ? '正在准备镜面' : '准备开始实时试衣'}</strong>
@@ -692,12 +759,12 @@ function App() {
             )}
 
             <div className="stage-meta">
-              <div className="meta-item"><Wifi size={15} /> <span>{stateLabels[sessionState]}</span></div>
+              <div className="meta-item"><Wifi size={15} /> <span>{cameraPreviewActive && !isRunning ? '摄像头预览' : stateLabels[sessionState]}</span></div>
               {usageSeconds > 0 && <div className="usage-counter">{usageSeconds}s</div>}
             </div>
           </div>
 
-          <div className={`bottom-panel ${garmentPanelCollapsed ? 'is-collapsed' : ''}`}>
+          <div id="garment-selection-panel" className={`bottom-panel ${garmentPanelCollapsed ? 'is-collapsed' : ''}`}>
           <div className="panel-heading">
             <div>
               <span className="panel-kicker">{activeGroup ? `COLLECTION / ${activeGroup.name}` : 'COLLECTION'}</span>
@@ -721,8 +788,8 @@ function App() {
               >
                 {garmentPanelCollapsed ? <ChevronUp size={17} /> : <ChevronDown size={17} />}
               </button>
-              {status === 'error' ? <button className="primary-button" type="button" onClick={() => void start()}><RefreshCw size={15} />重新连接</button>
-                : canStart ? <button className="primary-button" type="button" onClick={() => void start()}><Camera size={16} />开始试衣</button>
+              {status === 'error' ? <button className="primary-button" type="button" onClick={() => void start()} disabled={cameraPreviewState === 'opening'}><RefreshCw size={15} />重新连接</button>
+                : canStart ? <button className="primary-button" type="button" onClick={() => void start()} disabled={cameraPreviewState === 'opening'}><Camera size={16} />开始试衣</button>
                   : <button className="stop-button" type="button" onClick={() => void stop()}><CircleStop size={16} />停止</button>}
             </div>
           </div>
@@ -778,93 +845,120 @@ function App() {
           </div>
         </section>
 
+        <div className={`stage-toolbar ${viewOrientation === 'portrait' ? 'is-portrait' : ''}`}>
+          <div className="orientation-switch" role="group" aria-label="试衣画面方向">
+            <button className="orientation-button" type="button" onClick={() => setViewOrientation('landscape')} aria-label="横向视图" title="横向视图" aria-pressed={viewOrientation === 'landscape'}>
+              <Monitor size={16} />
+            </button>
+            <button className="orientation-button" type="button" onClick={() => setViewOrientation('portrait')} aria-label="竖向视图" title="竖向视图" aria-pressed={viewOrientation === 'portrait'}>
+              <Smartphone size={16} />
+            </button>
+          </div>
+          <button className="icon-button fullscreen-garment-toggle" type="button" onClick={toggleGarmentPanel} aria-expanded={!garmentPanelCollapsed} aria-controls="garment-selection-panel" aria-label={garmentPanelCollapsed ? '展开服装选择' : '收起服装选择'} title={garmentPanelCollapsed ? '展开服装选择' : '收起服装选择'}>
+            <Shirt size={17} />
+          </button>
+          <button className="icon-button stage-fullscreen-button" type="button" onClick={toggleFullscreen} aria-label={isFullscreen ? '退出视频全屏' : '视频全屏'} title={isFullscreen ? '退出视频全屏' : '视频全屏'} aria-pressed={isFullscreen}>
+            {isFullscreen ? <Minimize2 size={17} /> : <Expand size={17} />}
+          </button>
+        </div>
+
         <aside className="control-panel" aria-label="试衣参数">
-          <div className="control-heading">
-            <div>
-              <span className="panel-kicker">CONTROL ROOM</span>
-              <h2>实时链路</h2>
+          <div className="control-floats">
+            <div className="control-float control-float-left">
+              <div className="control-heading">
+                <div>
+                  <span className="panel-kicker">CONTROL ROOM</span>
+                  <h2>实时链路</h2>
+                </div>
+                <SlidersHorizontal size={19} />
+              </div>
+
+              <div className="control-section">
+                <div className="section-title"><SlidersHorizontal size={15} />采集参数</div>
+                <label className="field-label" htmlFor="camera-device">摄像头</label>
+                <div className="camera-select-row">
+                  <select id="camera-device" value={cameraDeviceId} onChange={(event) => setCameraDeviceId(event.target.value)} disabled={cameraSettingsLocked}>
+                    <option value="">系统默认摄像头</option>
+                    {cameraDeviceId && !cameraDevices.some((device) => device.deviceId === cameraDeviceId) && <option value={cameraDeviceId}>已记忆的摄像头（当前不可见）</option>}
+                    {cameraDevices.map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label}</option>)}
+                  </select>
+                  <button className="icon-button camera-refresh-button" type="button" onClick={() => void refreshCameraDevices()} disabled={isRunning || cameraPreviewState === 'opening'} title="刷新摄像头列表" aria-label="刷新摄像头列表">
+                    <RefreshCw size={15} />
+                  </button>
+                </div>
+                <p className="control-note">设备名称需在安全页面并授权摄像头后由浏览器提供</p>
+                <button className="secondary-button wide-button camera-preview-button" type="button" onClick={toggleCameraPreview} disabled={isRunning || cameraPreviewState === 'opening'}>
+                  {cameraPreviewState === 'opening' ? <LoaderCircle className="spin" size={15} /> : <Camera size={15} />}
+                  {cameraPreviewState === 'opening' ? '正在开启摄像头' : cameraPreviewActive ? '关闭摄像头预览' : '开启摄像头预览'}
+                </button>
+                <label className="field-label" htmlFor="capture-profile">分辨率</label>
+                <select id="capture-profile" value={captureProfileId} onChange={(event) => setCaptureProfileId(event.target.value as CaptureProfileId)} disabled={cameraSettingsLocked}>
+                  {captureProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.label}</option>)}
+                </select>
+                <label className="field-label" htmlFor="frame-rate">帧率</label>
+                <select id="frame-rate" value={frameRate} onChange={(event) => setFrameRate(Number(event.target.value))} disabled={cameraSettingsLocked}>
+                  {frameRateOptions.map((option) => <option key={option} value={option}>{option} FPS</option>)}
+                </select>
+                <label className="field-label" htmlFor="video-bitrate">上行码率上限</label>
+                <select id="video-bitrate" value={maxVideoBitrate} onChange={(event) => setMaxVideoBitrate(Number(event.target.value))} disabled={isRunning}>
+                  {bitrateOptions.map((option) => <option key={option} value={option}>{option / 1_000_000} Mbps</option>)}
+                </select>
+                <p className="control-note">参数仅对下一次启动生效</p>
+                <input ref={uploadInputRef} className="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => void handleUpload(event)} />
+                <button className="secondary-button wide-button" type="button" onClick={() => uploadInputRef.current?.click()}>
+                  <ImagePlus size={15} />上传衣服照片
+                </button>
+              </div>
             </div>
-            <SlidersHorizontal size={19} />
-          </div>
 
-          <div className="control-section">
-            <div className="section-title"><SlidersHorizontal size={15} />采集参数</div>
-            <label className="field-label" htmlFor="camera-device">摄像头</label>
-            <div className="camera-select-row">
-              <select id="camera-device" value={cameraDeviceId} onChange={(event) => setCameraDeviceId(event.target.value)} disabled={isRunning}>
-                <option value="">系统默认摄像头</option>
-                {cameraDeviceId && !cameraDevices.some((device) => device.deviceId === cameraDeviceId) && <option value={cameraDeviceId}>已记忆的摄像头（当前不可见）</option>}
-                {cameraDevices.map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label}</option>)}
-              </select>
-              <button className="icon-button camera-refresh-button" type="button" onClick={() => void refreshCameraDevices()} disabled={isRunning} title="刷新摄像头列表" aria-label="刷新摄像头列表">
-                <RefreshCw size={15} />
-              </button>
+            <div className="control-float control-float-right">
+              <div className="control-section">
+                <div className="section-title"><Gauge size={15} />实际链路</div>
+                <div className="metric-grid">
+                  <div className="metric-item"><span>摄像头采集</span><strong>{formatDimension(cameraSize?.width ?? null, cameraSize?.height ?? null)}</strong></div>
+                  <div className="metric-item"><span>远端视频</span><strong>{formatDimension(remoteSize?.width ?? null, remoteSize?.height ?? null)}</strong></div>
+                  <div className="metric-item"><span>上行</span><strong>{formatBitrate(mediaStats?.outboundBitrateBps ?? null)}</strong></div>
+                  <div className="metric-item"><span>下行</span><strong>{formatBitrate(mediaStats?.inboundBitrateBps ?? null)}</strong></div>
+                  <div className="metric-item"><span>上行帧率</span><strong>{formatFps(mediaStats?.outboundFramesPerSecond ?? null)}</strong></div>
+                  <div className="metric-item"><span>下行帧率</span><strong>{formatFps(mediaStats?.inboundFramesPerSecond ?? null)}</strong></div>
+                </div>
+                {mediaStats?.qualityLimitationReason && mediaStats.qualityLimitationReason !== 'none' && <p className="warning-note">上行受限：{mediaStats.qualityLimitationReason}</p>}
+              </div>
+
+              <div className="control-section">
+                <div className="section-title"><Wifi size={15} />诊断日志</div>
+                <p className={`diagnostic-context ${window.isSecureContext ? 'is-secure' : 'is-insecure'}`}>
+                  {window.isSecureContext ? '安全上下文，可申请摄像头' : '当前 HTTP 来源不支持摄像头，请使用 HTTPS'}
+                </p>
+                <button className="secondary-button wide-button" type="button" onClick={() => {
+                  logDiagnostic('info', 'diagnostics.exported', { entries: diagnosticLogs.length });
+                  downloadDiagnosticLogs();
+                }}>
+                  <Download size={15} />导出诊断日志（{diagnosticLogs.length}）
+                </button>
+                <details className="diagnostic-details">
+                  <summary>最近记录</summary>
+                  <ol className="diagnostic-list">
+                    {diagnosticLogs.slice(-6).reverse().map((entry, index) => (
+                      <li className={`diagnostic-entry ${entry.level}`} key={`${entry.timestamp}-${entry.event}-${index}`}>
+                        <time>{new Date(entry.timestamp).toLocaleTimeString()}</time>
+                        <strong>{entry.event}</strong>
+                        {typeof entry.details?.message === 'string' && <span>{entry.details.message}</span>}
+                      </li>
+                    ))}
+                  </ol>
+                </details>
+              </div>
+
+              <div className="control-actions">
+                {status === 'error' ? <button className="primary-button wide-button" type="button" onClick={() => void start()} disabled={cameraPreviewState === 'opening'}><RefreshCw size={15} />重新连接</button>
+                  : canStart ? <button className="primary-button wide-button" type="button" onClick={() => void start()} disabled={cameraPreviewState === 'opening'}><Camera size={16} />开始试衣</button>
+                    : <button className="stop-button wide-button" type="button" onClick={() => void stop()}><CircleStop size={16} />停止</button>}
+              </div>
+              {message && status !== 'error' && <div className="toast"><AlertCircle size={15} />{message}<button type="button" onClick={() => setMessage('')} aria-label="关闭提示"><X size={14} /></button></div>}
+              {status === 'error' && <div className="error-ribbon"><WifiOff size={15} />{message || '请检查网络、API Key 与供应商额度'}</div>}
             </div>
-            <p className="control-note">设备名称需在安全页面并授权摄像头后由浏览器提供</p>
-            <label className="field-label" htmlFor="capture-profile">分辨率</label>
-            <select id="capture-profile" value={captureProfileId} onChange={(event) => setCaptureProfileId(event.target.value as CaptureProfileId)} disabled={isRunning}>
-              {captureProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.label}</option>)}
-            </select>
-            <label className="field-label" htmlFor="frame-rate">帧率</label>
-            <select id="frame-rate" value={frameRate} onChange={(event) => setFrameRate(Number(event.target.value))} disabled={isRunning}>
-              {frameRateOptions.map((option) => <option key={option} value={option}>{option} FPS</option>)}
-            </select>
-            <label className="field-label" htmlFor="video-bitrate">上行码率上限</label>
-            <select id="video-bitrate" value={maxVideoBitrate} onChange={(event) => setMaxVideoBitrate(Number(event.target.value))} disabled={isRunning}>
-              {bitrateOptions.map((option) => <option key={option} value={option}>{option / 1_000_000} Mbps</option>)}
-            </select>
-            <p className="control-note">参数仅对下一次启动生效</p>
-            <input ref={uploadInputRef} className="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => void handleUpload(event)} />
-            <button className="secondary-button wide-button" type="button" onClick={() => uploadInputRef.current?.click()}>
-              <ImagePlus size={15} />上传衣服照片
-            </button>
           </div>
-
-          <div className="control-section">
-            <div className="section-title"><Gauge size={15} />实际链路</div>
-            <div className="metric-grid">
-              <div className="metric-item"><span>摄像头采集</span><strong>{formatDimension(cameraSize?.width ?? null, cameraSize?.height ?? null)}</strong></div>
-              <div className="metric-item"><span>远端视频</span><strong>{formatDimension(remoteSize?.width ?? null, remoteSize?.height ?? null)}</strong></div>
-              <div className="metric-item"><span>上行</span><strong>{formatBitrate(mediaStats?.outboundBitrateBps ?? null)}</strong></div>
-              <div className="metric-item"><span>下行</span><strong>{formatBitrate(mediaStats?.inboundBitrateBps ?? null)}</strong></div>
-              <div className="metric-item"><span>上行帧率</span><strong>{formatFps(mediaStats?.outboundFramesPerSecond ?? null)}</strong></div>
-              <div className="metric-item"><span>下行帧率</span><strong>{formatFps(mediaStats?.inboundFramesPerSecond ?? null)}</strong></div>
-            </div>
-            {mediaStats?.qualityLimitationReason && mediaStats.qualityLimitationReason !== 'none' && <p className="warning-note">上行受限：{mediaStats.qualityLimitationReason}</p>}
-          </div>
-
-          <div className="control-section">
-            <div className="section-title"><Wifi size={15} />诊断日志</div>
-            <p className={`diagnostic-context ${window.isSecureContext ? 'is-secure' : 'is-insecure'}`}>
-              {window.isSecureContext ? '安全上下文，可申请摄像头' : '当前 HTTP 来源不支持摄像头，请使用 HTTPS'}
-            </p>
-            <button className="secondary-button wide-button" type="button" onClick={() => {
-              logDiagnostic('info', 'diagnostics.exported', { entries: diagnosticLogs.length });
-              downloadDiagnosticLogs();
-            }}>
-              <Download size={15} />导出诊断日志（{diagnosticLogs.length}）
-            </button>
-            <details className="diagnostic-details">
-              <summary>最近记录</summary>
-              <ol className="diagnostic-list">
-                {diagnosticLogs.slice(-6).reverse().map((entry, index) => (
-                  <li className={`diagnostic-entry ${entry.level}`} key={`${entry.timestamp}-${entry.event}-${index}`}>
-                    <time>{new Date(entry.timestamp).toLocaleTimeString()}</time>
-                    <strong>{entry.event}</strong>
-                    {typeof entry.details?.message === 'string' && <span>{entry.details.message}</span>}
-                  </li>
-                ))}
-              </ol>
-            </details>
-          </div>
-
-          <div className="control-actions">
-            {status === 'error' ? <button className="primary-button wide-button" type="button" onClick={() => void start()}><RefreshCw size={15} />重新连接</button>
-              : canStart ? <button className="primary-button wide-button" type="button" onClick={() => void start()}><Camera size={16} />开始试衣</button>
-                : <button className="stop-button wide-button" type="button" onClick={() => void stop()}><CircleStop size={16} />停止</button>}
-          </div>
-          {message && status !== 'error' && <div className="toast"><AlertCircle size={15} />{message}<button type="button" onClick={() => setMessage('')} aria-label="关闭提示"><X size={14} /></button></div>}
-          {status === 'error' && <div className="error-ribbon"><WifiOff size={15} />{message || '请检查网络、API Key 与供应商额度'}</div>}
         </aside>
       </div>
     </main>

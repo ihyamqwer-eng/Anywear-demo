@@ -54,6 +54,8 @@ export interface ProviderKeyCard {
 
 export interface ProviderKeyPoolStatus {
   poolId: string;
+  groupId?: string;
+  groupName?: string;
   cards: ProviderKeyCard[];
 }
 
@@ -63,9 +65,18 @@ export interface AdminProviderKeyCard extends ProviderKeyCard {
   enabled: boolean;
 }
 
+export interface AdminProviderKeyGroup {
+  id: string;
+  name: string;
+  active: boolean;
+  cards: AdminProviderKeyCard[];
+}
+
 export interface AdminProviderKeyPoolStatus {
   poolId: string;
+  activeGroupId: string;
   cards: AdminProviderKeyCard[];
+  groups: AdminProviderKeyGroup[];
 }
 
 export interface ProviderKeySelection {

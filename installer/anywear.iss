@@ -7,7 +7,7 @@
 #endif
 
 #define AppName "Qingye Anywear"
-#define AppVersion "0.2.0"
+#define AppVersion "0.3.0"
 
 [Setup]
 AppId={{B9EC759B-EA25-472F-89E7-C74EB4A4B87D}

@@ -14,8 +14,10 @@ test('lists safe card status and binds manual or automatic sessions correctly', 
   const list = await app.inject({ method: 'GET', url: '/api/provider-keys' });
   assert.equal(list.statusCode, 200);
   assert.equal(list.headers['cache-control'], 'no-store');
-  const pool = list.json<{ poolId: string; cards: Array<Record<string, unknown>> }>();
+  const pool = list.json<{ poolId: string; groupId: string; groupName: string; cards: Array<Record<string, unknown>> }>();
   assert.equal(typeof pool.poolId, 'string');
+  assert.equal(pool.groupId, 'provider-group-default');
+  assert.equal(pool.groupName, '默认分组');
   const listedCards = pool.cards;
   assert.deepEqual(listedCards.map((card) => [card.id, card.number]), [
     ['provider-key-1', 1],

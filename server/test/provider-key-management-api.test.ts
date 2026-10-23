@@ -147,9 +147,15 @@ test('manages keys locally without exposing secrets and persists stable IDs', as
   const remaining = removed.json<{ cards: Array<{ id: string }> }>().cards;
   assert.deepEqual(remaining.map((card) => card.id), ['provider-key-2', 'provider-key-3']);
 
-  const stored = JSON.parse(await readFile(join(dataDirectory, 'provider-keys.json'), 'utf8')) as Array<{ id: string; value: string }>;
-  assert.deepEqual(stored.map((record) => record.id), ['provider-key-2', 'provider-key-3']);
-  assert.equal(stored.find((record) => record.id === 'provider-key-3')?.value, managedKey);
+  const stored = JSON.parse(await readFile(join(dataDirectory, 'provider-keys.json'), 'utf8')) as {
+    version: number;
+    groups: Array<{ id: string; name: string }>;
+    keys: Array<{ id: string; value: string; groupId: string }>;
+  };
+  assert.equal(stored.version, 2);
+  assert.equal(stored.groups[0]?.name, '默认分组');
+  assert.deepEqual(stored.keys.map((record) => record.id), ['provider-key-2', 'provider-key-3']);
+  assert.equal(stored.keys.find((record) => record.id === 'provider-key-3')?.value, managedKey);
 
   const reloaded = new ProviderKeyStore(join(dataDirectory, 'provider-keys.json')).load(['ignored-fallback-key']);
   assert.deepEqual(reloaded.map((record) => record.id), ['provider-key-2', 'provider-key-3']);

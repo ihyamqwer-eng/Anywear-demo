@@ -36,10 +36,14 @@ export async function fetchAdminProviderKeys(): Promise<AdminProviderKeyPoolStat
 }
 
 export async function addAdminProviderKey(key: string, label?: string): Promise<AdminProviderKeyPoolStatus> {
+  return addAdminProviderKeyToGroup(key, label);
+}
+
+export async function addAdminProviderKeyToGroup(key: string, label?: string, groupId?: string): Promise<AdminProviderKeyPoolStatus> {
   return readJson<AdminProviderKeyPoolStatus>(await fetch('/api/admin/provider-keys', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ key, ...(label ? { label } : {}) }),
+    body: JSON.stringify({ key, ...(label ? { label } : {}), ...(groupId ? { groupId } : {}) }),
   }));
 }
 
@@ -54,6 +58,42 @@ export async function setAdminProviderKeyEnabled(id: string, enabled: boolean): 
 export async function removeAdminProviderKey(id: string): Promise<AdminProviderKeyPoolStatus> {
   return readJson<AdminProviderKeyPoolStatus>(await fetch(`/api/admin/provider-keys/${encodeURIComponent(id)}`, {
     method: 'DELETE',
+  }));
+}
+
+export async function createAdminProviderKeyGroup(name: string): Promise<AdminProviderKeyPoolStatus> {
+  return readJson<AdminProviderKeyPoolStatus>(await fetch('/api/admin/provider-key-groups', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name }),
+  }));
+}
+
+export async function renameAdminProviderKeyGroup(id: string, name: string): Promise<AdminProviderKeyPoolStatus> {
+  return readJson<AdminProviderKeyPoolStatus>(await fetch(`/api/admin/provider-key-groups/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name }),
+  }));
+}
+
+export async function removeAdminProviderKeyGroup(id: string): Promise<AdminProviderKeyPoolStatus> {
+  return readJson<AdminProviderKeyPoolStatus>(await fetch(`/api/admin/provider-key-groups/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  }));
+}
+
+export async function activateAdminProviderKeyGroup(id: string): Promise<AdminProviderKeyPoolStatus> {
+  return readJson<AdminProviderKeyPoolStatus>(await fetch(`/api/admin/provider-key-groups/${encodeURIComponent(id)}/activate`, {
+    method: 'POST',
+  }));
+}
+
+export async function moveAdminProviderKeyToGroup(id: string, groupId: string): Promise<AdminProviderKeyPoolStatus> {
+  return readJson<AdminProviderKeyPoolStatus>(await fetch(`/api/admin/provider-keys/${encodeURIComponent(id)}/group`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ groupId }),
   }));
 }
 
