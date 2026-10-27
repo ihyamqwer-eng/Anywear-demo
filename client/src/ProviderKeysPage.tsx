@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, Check, CircleDashed, Clock3, KeyRound, RefreshCw, Settings2 } from 'lucide-react';
 import { fetchProviderKeys } from './api';
+import AppVersion from './AppVersion';
 import { getSelectedProviderKeySelection, saveSelectedProviderKeySelection } from './provider-key-selection';
 import type { ProviderKeyCard } from './types';
 
@@ -67,7 +68,7 @@ function ProviderKeysPage() {
           <div className="brand-mark"><img src="/brand/qingye-tech-logo.png" alt="青叶科技" /></div>
           <div>
             <p className="eyebrow">LIVE FITTING ROOM</p>
-            <h1>青叶科技</h1>
+            <h1>青叶科技 <AppVersion /></h1>
             <p className="brand-tagline">实时虚拟试衣</p>
           </div>
         </div>

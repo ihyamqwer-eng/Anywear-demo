@@ -1,20 +1,20 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ChangeEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ChangeEvent, type Dispatch, type SetStateAction } from 'react';
 import {
   AlertCircle,
   Camera,
   Check,
-  ChevronDown,
   ChevronLeft,
   ChevronRight,
-  ChevronUp,
   Clock3,
   CircleStop,
+  Compass,
   Download,
   Expand,
+  FlipHorizontal2,
+  FlipVertical2,
   FolderOpen,
   Gauge,
   ImagePlus,
-  KeyRound,
   LoaderCircle,
   Minimize2,
   Monitor,
@@ -27,7 +27,8 @@ import {
   WifiOff,
   X,
 } from 'lucide-react';
-import { ApiError, createSession, fetchGarmentGroups, imageToBase64, stopSession } from './api';
+import { ApiError, createSession, fetchGarmentGroups, imageToBase64, importGarmentGroup, stopSession } from './api';
+import AppVersion from './AppVersion';
 import { getSelectedProviderKeySelection } from './provider-key-selection';
 import { downloadDiagnosticLogs, getBrowserDiagnosticContext, getDiagnosticLogs, logDiagnostic, subscribeDiagnosticLogs } from './diagnostics';
 import { RealtimeConnection, type RealtimeMediaStats } from './realtime';
@@ -55,6 +56,32 @@ const stateLabels: Record<SessionState, string> = {
   error: '异常',
 };
 
+const panelPreferenceKeys = {
+  capture: 'anywear-capture-panel-collapsed',
+  diagnostics: 'anywear-diagnostics-panel-collapsed',
+  garments: 'anywear-garment-panel-collapsed-v2',
+} as const;
+
+function readCollapsedPreference(key: string) {
+  try {
+    return window.localStorage.getItem(key) !== 'false';
+  } catch {
+    return true;
+  }
+}
+
+function toggleCollapsedPreference(key: string, setCollapsed: Dispatch<SetStateAction<boolean>>) {
+  setCollapsed((collapsed) => {
+    const next = !collapsed;
+    try {
+      window.localStorage.setItem(key, String(next));
+    } catch {
+      // The control remains usable when browser storage is unavailable.
+    }
+    return next;
+  });
+}
+
 const captureProfiles = [
   { id: '1080p', label: '1920 × 1080', width: 1920, height: 1080 },
   { id: '720p', label: '1280 × 720', width: 1280, height: 720 },
@@ -62,12 +89,13 @@ const captureProfiles = [
 ] as const;
 
 const frameRateOptions = [15, 20, 30] as const;
-const bitrateOptions = [2_000_000, 4_000_000, 6_000_000] as const;
 type CaptureProfileId = typeof captureProfiles[number]['id'];
 type CameraDevice = { deviceId: string; label: string };
 const maxUploadBytes = 10 * 1024 * 1024;
+const maxGroupImageCount = 200;
+const maxGroupUploadBytes = 200 * 1024 * 1024;
 const garmentsPerPage = 8;
-const uploadedGroupId = 'uploaded';
+const uploadedGroupId = 'user-garment-uploads';
 const cameraPreferenceKey = 'anywear-camera-device-id';
 
 function formatBitrate(value: number | null): string {
@@ -83,21 +111,31 @@ function formatFps(value: number | null): string {
   return value === null ? '--' : `${value.toFixed(1)} FPS`;
 }
 
-function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result ?? ''));
-    reader.onerror = () => reject(reader.error ?? new Error('无法读取衣服图片'));
-    reader.readAsDataURL(file);
-  });
+function formatGarmentLabel(index: number): string {
+  return String(index % 1000).padStart(3, '0');
 }
 
-function garmentNameFromFile(fileName: string): string {
-  return fileName.replace(/\.[^.]+$/, '').trim().slice(0, 40) || '上传服装';
+async function dataUrlToFile(dataUrl: string, name: string): Promise<File> {
+  const maxEncodedDataUrlLength = Math.ceil(maxUploadBytes / 3) * 4 + 64;
+  if (dataUrl.length > maxEncodedDataUrlLength) throw new Error('衣服图片不能超过 10 MB');
+
+  const match = /^data:image\/(jpeg|png|webp);base64,([a-z\d+/]*={0,2})$/i.exec(dataUrl);
+  if (!match) throw new Error('网页图片必须是 JPG、PNG 或 WebP 格式');
+
+  const base64 = match[2];
+  const paddingBytes = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
+  const decodedSize = Math.floor(base64.length * 3 / 4) - paddingBytes;
+  if (decodedSize > maxUploadBytes) throw new Error('衣服图片不能超过 10 MB');
+
+  const type = `image/${match[1].toLowerCase() === 'jpg' ? 'jpeg' : match[1].toLowerCase()}`;
+  const bytes = Uint8Array.from(window.atob(base64), (character) => character.charCodeAt(0));
+  const safeName = name.replace(/[\\/:\0-\x1f]/g, '_').slice(0, 120) || '网页服装';
+  return new File([bytes], safeName, { type });
 }
 
 function App() {
   const workspaceRef = useRef<HTMLDivElement>(null);
+  const garmentGridRef = useRef<HTMLDivElement>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
@@ -111,7 +149,7 @@ function App() {
   const queuedGarmentRef = useRef<Garment | null>(null);
   const garmentTimeoutRef = useRef<number | undefined>(undefined);
   const garmentsRef = useRef<Garment[]>([]);
-  const localDirectoryGroupsRef = useRef<GarmentGroup[]>([]);
+  const garmentGroupsRef = useRef<GarmentGroup[]>([]);
   const cameraRequestRef = useRef(0);
   const cameraOpenPromiseRef = useRef<Promise<MediaStream> | null>(null);
   const [garments, setGarments] = useState<Garment[]>([]);
@@ -128,6 +166,8 @@ function App() {
   const [usageSeconds, setUsageSeconds] = useState(0);
   const [remoteReady, setRemoteReady] = useState(false);
   const [viewOrientation, setViewOrientation] = useState<'landscape' | 'portrait'>('landscape');
+  const [flipHorizontal, setFlipHorizontal] = useState(true);
+  const [flipVertical, setFlipVertical] = useState(false);
   const [cameraSize, setCameraSize] = useState<{ width: number; height: number } | null>(null);
   const [remoteSize, setRemoteSize] = useState<{ width: number; height: number } | null>(null);
   const [mediaStats, setMediaStats] = useState<RealtimeMediaStats | null>(null);
@@ -142,16 +182,12 @@ function App() {
   });
   const [captureProfileId, setCaptureProfileId] = useState<CaptureProfileId>('1080p');
   const [frameRate, setFrameRate] = useState<number>(30);
-  const [maxVideoBitrate, setMaxVideoBitrate] = useState<number>(4_000_000);
+  const [isSavingGarments, setIsSavingGarments] = useState(false);
   const captureProfile = captureProfiles.find((profile) => profile.id === captureProfileId) ?? captureProfiles[0];
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [garmentPanelCollapsed, setGarmentPanelCollapsed] = useState(() => {
-    try {
-      return window.localStorage.getItem('anywear-garment-panel-collapsed') === 'true';
-    } catch {
-      return false;
-    }
-  });
+  const [capturePanelCollapsed, setCapturePanelCollapsed] = useState(() => readCollapsedPreference(panelPreferenceKeys.capture));
+  const [diagnosticsPanelCollapsed, setDiagnosticsPanelCollapsed] = useState(() => readCollapsedPreference(panelPreferenceKeys.diagnostics));
+  const [garmentPanelCollapsed, setGarmentPanelCollapsed] = useState(() => readCollapsedPreference(panelPreferenceKeys.garments));
   const isCompactWindow = new URLSearchParams(window.location.search).has('compact');
   const showError = useCallback((error: unknown) => {
     const text = error instanceof Error ? error.message : String(error);
@@ -362,42 +398,45 @@ function App() {
     }
   }, [failSession]);
 
-  const addUploadedGarment = useCallback(async (imageData: string, name: string) => {
-    if (!imageData.startsWith('data:image/')) {
-      setMessage('请选择 JPG、PNG 或 WebP 图片');
-      return;
-    }
-    const comma = imageData.indexOf(',');
-    const encodedData = comma >= 0 ? imageData.slice(comma + 1) : imageData;
-    const decodedBytes = Math.floor(encodedData.length * 3 / 4);
-    if (decodedBytes > maxUploadBytes) {
+  const publishImportedGroup = useCallback((group: GarmentGroup) => {
+    const currentGroups = garmentGroupsRef.current;
+    const groupIndex = currentGroups.findIndex((item) => item.id === group.id);
+    const nextGroups = groupIndex < 0
+      ? [...currentGroups, group]
+      : currentGroups.map((item) => item.id === group.id ? group : item);
+    const nextGarments = nextGroups.flatMap((item) => item.garments);
+    garmentGroupsRef.current = nextGroups;
+    garmentsRef.current = nextGarments;
+    setGarmentGroups(nextGroups);
+    setGarments(nextGarments);
+    setActiveGroupId(group.id);
+    setGroupPage(0);
+  }, []);
+
+  const addUploadedGarment = useCallback(async (file: File) => {
+    if (file.size > maxUploadBytes) {
       setMessage('衣服图片不能超过 10 MB');
       return;
     }
-    const garment: Garment = {
-      id: `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      name: name || '上传服装',
-      image: imageData,
-      prompt: 'Replace the current upper-body garment with the uploaded garment. Preserve the person, pose, face, hands, and background.',
-      enabled: true,
-    };
-    const nextGarments = [garment, ...garmentsRef.current.filter((item) => item.id !== garment.id)];
-    garmentsRef.current = nextGarments;
-    setGarments(nextGarments);
-    setGarmentGroups((groups) => {
-      const uploadedGroup = groups.find((group) => group.id === uploadedGroupId);
-      const nextUploadedGarments = [garment, ...(uploadedGroup?.garments ?? []).filter((item) => item.id !== garment.id)];
-      const nextUploadedGroup = { id: uploadedGroupId, name: '我的上传', garments: nextUploadedGarments };
-      return uploadedGroup
-        ? groups.map((group) => group.id === uploadedGroupId ? nextUploadedGroup : group)
-        : [...groups, nextUploadedGroup];
-    });
-    setActiveGroupId(uploadedGroupId);
-    setGroupPage(0);
-    selectedIdRef.current = garment.id;
-    setSelectedId(garment.id);
-    if (connectionRef.current) await selectGarment(garment);
-  }, [selectGarment]);
+    setIsSavingGarments(true);
+    setMessage('正在保存服装图片…');
+    try {
+      const existingIds = new Set(garmentGroupsRef.current.find((item) => item.id === uploadedGroupId)?.garments.map((item) => item.id) ?? []);
+      const group = await importGarmentGroup('我的上传', [file], uploadedGroupId);
+      publishImportedGroup(group);
+      const garment = group.garments.find((item) => !existingIds.has(item.id)) ?? group.garments.at(-1);
+      if (garment) {
+        selectedIdRef.current = garment.id;
+        setSelectedId(garment.id);
+        if (connectionRef.current) await selectGarment(garment);
+      }
+      setMessage('服装已保存到本机，之后无需重新上传');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsSavingGarments(false);
+    }
+  }, [publishImportedGroup, selectGarment]);
 
   const handleUpload = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -412,13 +451,13 @@ function App() {
       return;
     }
     try {
-      await addUploadedGarment(await readFileAsDataUrl(file), garmentNameFromFile(file.name));
+      await addUploadedGarment(file);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     }
   }, [addUploadedGarment]);
 
-  const handleDirectoryImport = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+  const handleDirectoryImport = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
     event.target.value = '';
     if (files.length === 0) return;
@@ -430,31 +469,28 @@ function App() {
       setMessage(imageFiles.length > 0 ? '衣服图片不能超过 10 MB' : '所选目录中没有 JPG、PNG 或 WebP 图片');
       return;
     }
+    const totalBytes = supportedFiles.reduce((total, file) => total + file.size, 0);
+    if (supportedFiles.length > maxGroupImageCount || totalBytes > maxGroupUploadBytes) {
+      setMessage('单个图组最多保存 200 张图片，总大小不超过 200 MB');
+      return;
+    }
 
     const relativePath = supportedFiles[0].webkitRelativePath;
     const directoryName = (relativePath.split('/')[0] || '本地服装目录').slice(0, 32);
-    const importedGarments = supportedFiles.map((file) => ({
-      id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      name: garmentNameFromFile(file.name),
-      image: URL.createObjectURL(file),
-      prompt: 'Replace the current upper-body garment with the garment shown in the reference image. Preserve the person, pose, face, hands, and background.',
-      enabled: true,
-    }));
-    const group: GarmentGroup = {
-      id: `local-directory-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      name: directoryName,
-      garments: importedGarments,
-    };
-
-    localDirectoryGroupsRef.current = [...localDirectoryGroupsRef.current, group];
-    garmentsRef.current = [...garmentsRef.current, ...importedGarments];
-    setGarments(garmentsRef.current);
-    setGarmentGroups((groups) => [...groups, group]);
-    setActiveGroupId(group.id);
-    setGroupPage(0);
+    setIsSavingGarments(true);
+    setMessage('正在保存图组到本机…');
+    try {
+      const group = await importGarmentGroup(directoryName, supportedFiles);
+      publishImportedGroup(group);
+      setMessage(`已保存图组「${group.name}」，下次打开仍可使用`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsSavingGarments(false);
+    }
     const rejectedCount = files.length - supportedFiles.length;
-    setMessage(`已导入 ${supportedFiles.length} 件服装${rejectedCount > 0 ? `，跳过 ${rejectedCount} 个不支持或超过 10 MB 的文件` : ''}`);
-  }, []);
+    if (rejectedCount > 0) setMessage((current) => `${current}；跳过 ${rejectedCount} 个不支持或超过 10 MB 的文件`);
+  }, [publishImportedGroup]);
 
   const start = useCallback(async () => {
     if (status === 'starting' || status === 'live' || status === 'switching') return;
@@ -469,7 +505,6 @@ function App() {
         ...getBrowserDiagnosticContext(),
         captureProfile: captureProfile.id,
         frameRate,
-        maxVideoBitrate,
         cameraSelection: cameraDeviceId ? 'specific' : 'default',
       });
       const stream = localStreamRef.current ?? await openCameraPreview();
@@ -485,7 +520,6 @@ function App() {
       const connection = new RealtimeConnection({
         session,
         localStream: stream,
-        maxVideoBitrateBps: maxVideoBitrate,
         onRemoteStream: (remoteStream) => {
           if (sessionIdRef.current !== session.sessionId) return;
           logDiagnostic('info', 'media.remote-stream', { tracks: remoteStream.getTracks().map((track) => track.kind) });
@@ -575,7 +609,7 @@ function App() {
         showError(error);
       }
     }
-  }, [cameraDeviceId, captureProfile, failSession, frameRate, isCompactWindow, maxVideoBitrate, openCameraPreview, releaseMedia, selectGarment, showError, status, stop]);
+  }, [cameraDeviceId, captureProfile, failSession, frameRate, isCompactWindow, openCameraPreview, releaseMedia, selectGarment, showError, status, stop]);
 
   useEffect(() => {
     const queuedGarment = queuedGarmentRef.current;
@@ -587,14 +621,10 @@ function App() {
 
   useEffect(() => {
     fetchGarmentGroups().then((groups) => {
-      const uploadedGarments = garmentsRef.current.filter((garment) => garment.id.startsWith('custom-'));
-      const groupsWithUploads = uploadedGarments.length > 0
-        ? [...groups.filter((group) => group.id !== uploadedGroupId), { id: uploadedGroupId, name: '我的上传', garments: uploadedGarments }]
-        : groups;
-      const allGroups = [...groupsWithUploads, ...localDirectoryGroupsRef.current];
-      garmentsRef.current = allGroups.flatMap((group) => group.garments);
+      garmentGroupsRef.current = groups;
+      garmentsRef.current = groups.flatMap((group) => group.garments);
       setGarments(garmentsRef.current);
-      setGarmentGroups(allGroups);
+      setGarmentGroups(groups);
     }).catch(showError);
     return () => {
       void teardown('idle');
@@ -675,10 +705,17 @@ function App() {
 
   useEffect(() => {
     const onExtensionGarment = (event: MessageEvent<unknown>) => {
-      if (event.source !== window.parent || !event.data || typeof event.data !== 'object') return;
+      const isExtensionOrigin = /^chrome-extension:\/\/[a-p]{32}$/.test(event.origin);
+      if (window.parent === window || event.source !== window.parent || !isExtensionOrigin || !new URLSearchParams(window.location.search).has('extension') || !event.data || typeof event.data !== 'object') return;
       const payload = event.data as { type?: unknown; imageData?: unknown; name?: unknown };
       if (payload.type !== 'anywear-garment-image' || typeof payload.imageData !== 'string') return;
-      void addUploadedGarment(payload.imageData, typeof payload.name === 'string' ? payload.name : '网页服装');
+      if (payload.imageData.length > Math.ceil(maxUploadBytes / 3) * 4 + 64) {
+        setMessage('衣服图片不能超过 10 MB');
+        return;
+      }
+      void dataUrlToFile(payload.imageData, typeof payload.name === 'string' ? payload.name : '网页服装.png')
+        .then(addUploadedGarment)
+        .catch((error: unknown) => setMessage(error instanceof Error ? error.message : String(error)));
     };
     window.addEventListener('message', onExtensionGarment);
     return () => window.removeEventListener('message', onExtensionGarment);
@@ -694,22 +731,42 @@ function App() {
   };
 
   const toggleGarmentPanel = () => {
-    setGarmentPanelCollapsed((collapsed) => {
-      const next = !collapsed;
-      try {
-        window.localStorage.setItem('anywear-garment-panel-collapsed', String(next));
-      } catch {
-        // The control remains usable when browser storage is unavailable.
-      }
-      return next;
-    });
+    toggleCollapsedPreference(panelPreferenceKeys.garments, setGarmentPanelCollapsed);
   };
 
   const activeGarment = garments.find((garment) => garment.id === selectedId);
   const activeGroup = garmentGroups.find((group) => group.id === activeGroupId) ?? garmentGroups[0];
+  const garmentDisplayNames = new Map<string, string>();
+  let garmentIndex = 0;
+  garmentGroups.forEach((group) => {
+    group.garments.forEach((garment) => {
+      garmentDisplayNames.set(garment.id, formatGarmentLabel(garmentIndex));
+      garmentIndex += 1;
+    });
+  });
+  const getGarmentDisplayName = (garment: Garment | undefined) => garment
+    ? garmentDisplayNames.get(garment.id) ?? formatGarmentLabel(0)
+    : '选择一件上衣';
   const pageCount = activeGroup ? Math.max(1, Math.ceil(activeGroup.garments.length / garmentsPerPage)) : 0;
   const currentPage = Math.min(groupPage, Math.max(0, pageCount - 1));
   const visibleGarments = activeGroup?.garments.slice(currentPage * garmentsPerPage, (currentPage + 1) * garmentsPerPage) ?? [];
+  const handleGarmentGridWheel = useCallback((event: WheelEvent) => {
+    const grid = garmentGridRef.current;
+    if (!grid) return;
+    const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+    const maxScrollLeft = grid.scrollWidth - grid.clientWidth;
+    if (maxScrollLeft <= 0 || delta === 0) return;
+    const nextScrollLeft = Math.max(0, Math.min(maxScrollLeft, grid.scrollLeft + delta));
+    if (nextScrollLeft === grid.scrollLeft) return;
+    event.preventDefault();
+    grid.scrollLeft = nextScrollLeft;
+  }, []);
+  useEffect(() => {
+    const grid = garmentGridRef.current;
+    if (!grid) return;
+    grid.addEventListener('wheel', handleGarmentGridWheel, { passive: false });
+    return () => grid.removeEventListener('wheel', handleGarmentGridWheel);
+  }, [garmentPanelCollapsed, handleGarmentGridWheel, visibleGarments.length]);
   const canStart = status !== 'starting' && status !== 'live' && status !== 'switching';
   const isRunning = status === 'starting' || status === 'live' || status === 'switching';
   const cameraPreviewActive = cameraPreviewState === 'open';
@@ -721,14 +778,14 @@ function App() {
           <div className="brand-mark"><img src="/brand/qingye-tech-logo.png" alt="青叶科技" /></div>
           <div>
             <p className="eyebrow">LIVE FITTING ROOM</p>
-            <h1>青叶科技</h1>
+            <h1>青叶科技 <AppVersion /></h1>
             <p className="brand-tagline">实时虚拟试衣</p>
           </div>
         </div>
         <div className="top-actions">
           <div className={`connection-pill ${cameraPreviewActive && !isRunning ? 'preview' : status}`} role="status" aria-label={cameraPreviewActive && !isRunning ? '摄像头预览' : statusLabels[status]}><span className="status-dot" /><span className="connection-label">{cameraPreviewActive && !isRunning ? '摄像头预览' : statusLabels[status]}</span></div>
-          <button className="icon-button" type="button" onClick={() => window.location.assign(`/cards${isCompactWindow ? '?compact=1' : ''}`)} disabled={isRunning} aria-label="打开 API 卡池" title={isRunning ? '停止当前会话后管理卡池' : 'API 卡池'}>
-            <KeyRound size={17} />
+          <button className="icon-button" type="button" onClick={() => window.location.assign(`/cards${isCompactWindow ? '?compact=1' : ''}`)} disabled={isRunning} aria-label="打开更多功能" title={isRunning ? '停止当前会话后打开更多功能' : '更多功能'}>
+            <Compass size={17} />
           </button>
           {!isCompactWindow && <button className="icon-button" type="button" onClick={openCompactWindow} aria-label="打开小窗模式" title="打开小窗模式">
             <PictureInPicture2 size={18} />
@@ -736,8 +793,8 @@ function App() {
         </div>
       </header>
 
-      <div className="workspace" ref={workspaceRef}>
-        <section className={`preview-column ${viewOrientation === 'portrait' ? 'is-portrait' : ''}`} aria-label="实时试衣画面">
+      <div className={`workspace ${capturePanelCollapsed && diagnosticsPanelCollapsed ? 'is-controls-collapsed' : ''}`} ref={workspaceRef}>
+        <section className={`preview-column ${viewOrientation === 'portrait' ? 'is-portrait' : ''} ${flipHorizontal ? 'is-flipped-horizontal' : ''} ${flipVertical ? 'is-flipped-vertical' : ''}`} aria-label="实时试衣画面">
           <div className="video-frame">
             <video ref={localVideoRef} className="video-layer local-video" autoPlay muted playsInline onLoadedMetadata={(event) => {
               if (event.currentTarget.videoWidth && event.currentTarget.videoHeight) setCameraSize({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight });
@@ -764,34 +821,58 @@ function App() {
             </div>
           </div>
 
+          <div className={`stage-toolbar ${viewOrientation === 'portrait' ? 'is-portrait' : ''}`}>
+            <div className="orientation-switch" role="group" aria-label="试衣画面方向">
+              <button className="orientation-button" type="button" onClick={() => setViewOrientation('landscape')} aria-label="横向视图" title="横向视图" aria-pressed={viewOrientation === 'landscape'}>
+                <Monitor size={16} />
+              </button>
+              <button className="orientation-button" type="button" onClick={() => setViewOrientation('portrait')} aria-label="竖向视图" title="竖向视图" aria-pressed={viewOrientation === 'portrait'}>
+                <Smartphone size={16} />
+              </button>
+            </div>
+            <div className="flip-switch" role="group" aria-label="视频画面翻转">
+              <button className="orientation-button flip-control-button" type="button" onClick={() => setFlipHorizontal((flipped) => !flipped)} aria-label="左右翻转" title={`${flipHorizontal ? '关闭' : '开启'}左右翻转`} aria-pressed={flipHorizontal}>
+                <FlipHorizontal2 size={16} /><span>左右翻转</span>
+              </button>
+              <button className="orientation-button flip-control-button" type="button" onClick={() => setFlipVertical((flipped) => !flipped)} aria-label="上下翻转" title={`${flipVertical ? '关闭' : '开启'}上下翻转`} aria-pressed={flipVertical}>
+                <FlipVertical2 size={16} /><span>上下翻转</span>
+              </button>
+            </div>
+            <button className="orientation-button panel-toolbar-button" type="button" onClick={() => toggleCollapsedPreference(panelPreferenceKeys.capture, setCapturePanelCollapsed)} aria-label={capturePanelCollapsed ? '展开采集参数栏' : '收起采集参数栏'} title={capturePanelCollapsed ? '展开采集参数栏' : '收起采集参数栏'} aria-controls="capture-parameter-panel" aria-expanded={!capturePanelCollapsed}>
+              <SlidersHorizontal size={16} />
+            </button>
+            <button className="orientation-button panel-toolbar-button" type="button" onClick={() => toggleCollapsedPreference(panelPreferenceKeys.diagnostics, setDiagnosticsPanelCollapsed)} aria-label={diagnosticsPanelCollapsed ? '展开链路诊断栏' : '收起链路诊断栏'} title={diagnosticsPanelCollapsed ? '展开链路诊断栏' : '收起链路诊断栏'} aria-controls="diagnostics-panel" aria-expanded={!diagnosticsPanelCollapsed}>
+              <Gauge size={16} />
+            </button>
+            <button className="icon-button fullscreen-garment-toggle" type="button" onClick={toggleGarmentPanel} aria-expanded={!garmentPanelCollapsed} aria-controls="garment-selection-panel" aria-label={garmentPanelCollapsed ? '展开服装选择' : '收起服装选择'} title={garmentPanelCollapsed ? '展开服装选择' : '收起服装选择'}>
+              <Shirt size={17} />
+            </button>
+            <button className="icon-button stage-fullscreen-button" type="button" onClick={toggleFullscreen} aria-label={isFullscreen ? '退出视频全屏' : '视频全屏'} title={isFullscreen ? '退出视频全屏' : '视频全屏'} aria-pressed={isFullscreen}>
+              {isFullscreen ? <Minimize2 size={17} /> : <Expand size={17} />}
+            </button>
+          </div>
+
           <div id="garment-selection-panel" className={`bottom-panel ${garmentPanelCollapsed ? 'is-collapsed' : ''}`}>
           <div className="panel-heading">
             <div>
               <span className="panel-kicker">{activeGroup ? `COLLECTION / ${activeGroup.name}` : 'COLLECTION'}</span>
-              <h2>{activeGarment?.name ?? '选择一件上衣'}</h2>
+              <h2>{getGarmentDisplayName(activeGarment)}</h2>
             </div>
             <div className="panel-actions">
               <input ref={(element) => {
                 directoryInputRef.current = element;
                 if (element) element.webkitdirectory = true;
               }} className="visually-hidden" type="file" multiple accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" onChange={handleDirectoryImport} />
-              <button className="secondary-button directory-import-button" type="button" onClick={() => directoryInputRef.current?.click()} title="从本机选择一个服装目录" aria-label="选择图组目录">
-                <FolderOpen size={15} /><span>选择图组目录</span>
-              </button>
-              <button
-                className="icon-button panel-toggle"
-                type="button"
-                onClick={toggleGarmentPanel}
-                aria-expanded={!garmentPanelCollapsed}
-                aria-label={garmentPanelCollapsed ? '展开服装选择' : '收起服装选择'}
-                title={garmentPanelCollapsed ? '展开服装选择' : '收起服装选择'}
-              >
-                {garmentPanelCollapsed ? <ChevronUp size={17} /> : <ChevronDown size={17} />}
+              <button className="secondary-button directory-import-button" type="button" onClick={() => directoryInputRef.current?.click()} disabled={isSavingGarments} title="选择并保存一个服装目录到本机" aria-label="选择图组目录">
+                {isSavingGarments ? <LoaderCircle className="spin" size={15} /> : <FolderOpen size={15} />}<span>{isSavingGarments ? '正在保存' : '选择图组目录'}</span>
               </button>
               {status === 'error' ? <button className="primary-button" type="button" onClick={() => void start()} disabled={cameraPreviewState === 'opening'}><RefreshCw size={15} />重新连接</button>
                 : canStart ? <button className="primary-button" type="button" onClick={() => void start()} disabled={cameraPreviewState === 'opening'}><Camera size={16} />开始试衣</button>
                   : <button className="stop-button" type="button" onClick={() => void stop()}><CircleStop size={16} />停止</button>}
             </div>
+            <button className="icon-button panel-close-button" type="button" onClick={toggleGarmentPanel} aria-label="收起服装选择" title="收起服装选择">
+              <X size={15} />
+            </button>
           </div>
           {!garmentPanelCollapsed && (
           <div className="garment-browser">
@@ -813,7 +894,7 @@ function App() {
                 ))}
               </div>
               {activeGroup && visibleGarments.length === 0 && <p className="empty-garment-group">此目录暂无可用服装</p>}
-              {visibleGarments.length > 0 && <div className="garment-grid" role="tabpanel" aria-label={`${activeGroup.name}服装`}>
+              {visibleGarments.length > 0 && <div ref={garmentGridRef} className="garment-grid" role="tabpanel" aria-label={`${activeGroup.name}服装`}>
               {visibleGarments.map((garment) => (
                 <button
                   key={garment.id}
@@ -824,7 +905,7 @@ function App() {
                   className={`garment-item ${selectedId === garment.id ? 'selected' : ''} ${pendingGarmentId === garment.id ? 'pending' : ''} ${queuedGarmentId === garment.id ? 'queued' : ''}`}
                 >
                   <span className="garment-thumb"><img src={garment.image} alt="" /></span>
-                  <span className="garment-name">{garment.name}</span>
+                  <span className="garment-name">{getGarmentDisplayName(garment)}</span>
                   {selectedId === garment.id && <span className="selected-mark"><Check size={13} /></span>}
                   {pendingGarmentId === garment.id && <span className="pending-mark"><LoaderCircle size={13} /></span>}
                   {queuedGarmentId === garment.id && <span className="queued-mark" aria-label="等待切换"><Clock3 size={13} /></span>}
@@ -845,26 +926,9 @@ function App() {
           </div>
         </section>
 
-        <div className={`stage-toolbar ${viewOrientation === 'portrait' ? 'is-portrait' : ''}`}>
-          <div className="orientation-switch" role="group" aria-label="试衣画面方向">
-            <button className="orientation-button" type="button" onClick={() => setViewOrientation('landscape')} aria-label="横向视图" title="横向视图" aria-pressed={viewOrientation === 'landscape'}>
-              <Monitor size={16} />
-            </button>
-            <button className="orientation-button" type="button" onClick={() => setViewOrientation('portrait')} aria-label="竖向视图" title="竖向视图" aria-pressed={viewOrientation === 'portrait'}>
-              <Smartphone size={16} />
-            </button>
-          </div>
-          <button className="icon-button fullscreen-garment-toggle" type="button" onClick={toggleGarmentPanel} aria-expanded={!garmentPanelCollapsed} aria-controls="garment-selection-panel" aria-label={garmentPanelCollapsed ? '展开服装选择' : '收起服装选择'} title={garmentPanelCollapsed ? '展开服装选择' : '收起服装选择'}>
-            <Shirt size={17} />
-          </button>
-          <button className="icon-button stage-fullscreen-button" type="button" onClick={toggleFullscreen} aria-label={isFullscreen ? '退出视频全屏' : '视频全屏'} title={isFullscreen ? '退出视频全屏' : '视频全屏'} aria-pressed={isFullscreen}>
-            {isFullscreen ? <Minimize2 size={17} /> : <Expand size={17} />}
-          </button>
-        </div>
-
-        <aside className="control-panel" aria-label="试衣参数">
+        <aside className={`control-panel ${capturePanelCollapsed && diagnosticsPanelCollapsed ? 'is-collapsed' : ''}`} aria-label="试衣参数">
           <div className="control-floats">
-            <div className="control-float control-float-left">
+            <div id="capture-parameter-panel" className={`control-float control-float-left ${capturePanelCollapsed ? 'is-collapsed' : ''}`}>
               <div className="control-heading">
                 <div>
                   <span className="panel-kicker">CONTROL ROOM</span>
@@ -899,19 +963,15 @@ function App() {
                 <select id="frame-rate" value={frameRate} onChange={(event) => setFrameRate(Number(event.target.value))} disabled={cameraSettingsLocked}>
                   {frameRateOptions.map((option) => <option key={option} value={option}>{option} FPS</option>)}
                 </select>
-                <label className="field-label" htmlFor="video-bitrate">上行码率上限</label>
-                <select id="video-bitrate" value={maxVideoBitrate} onChange={(event) => setMaxVideoBitrate(Number(event.target.value))} disabled={isRunning}>
-                  {bitrateOptions.map((option) => <option key={option} value={option}>{option / 1_000_000} Mbps</option>)}
-                </select>
-                <p className="control-note">参数仅对下一次启动生效</p>
+                <p className="control-note">默认请求 1080p；实际画质和带宽由摄像头、浏览器及网络自适应协商。</p>
                 <input ref={uploadInputRef} className="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => void handleUpload(event)} />
-                <button className="secondary-button wide-button" type="button" onClick={() => uploadInputRef.current?.click()}>
-                  <ImagePlus size={15} />上传衣服照片
+                <button className="secondary-button wide-button" type="button" onClick={() => uploadInputRef.current?.click()} disabled={isSavingGarments}>
+                  {isSavingGarments ? <LoaderCircle className="spin" size={15} /> : <ImagePlus size={15} />}{isSavingGarments ? '正在保存服装' : '上传衣服照片'}
                 </button>
               </div>
             </div>
 
-            <div className="control-float control-float-right">
+            <div id="diagnostics-panel" className={`control-float control-float-right ${diagnosticsPanelCollapsed ? 'is-collapsed' : ''}`}>
               <div className="control-section">
                 <div className="section-title"><Gauge size={15} />实际链路</div>
                 <div className="metric-grid">

@@ -95,6 +95,23 @@ test('keeps key IDs stable across removal and never reuses removed IDs', () => {
   assert.equal(pool.has('provider-key-1'), false);
 });
 
+test('keeps a group pool ID stable across service restarts with unchanged keys', () => {
+  const groups = [{ id: 'provider-group-default', name: '默认分组' }];
+  const keys = [
+    { id: 'provider-key-1', value: 'placeholder-key-a', label: 'A', enabled: true, groupId: groups[0]!.id },
+    { id: 'provider-key-2', value: 'placeholder-key-b', label: 'B', enabled: true, groupId: groups[0]!.id },
+  ];
+  const firstRun = new ProviderKeyPool(keys, 0, groups, groups[0]!.id);
+  const restarted = new ProviderKeyPool(keys, 0, groups, groups[0]!.id);
+  const changed = new ProviderKeyPool([
+    ...keys,
+    { id: 'provider-key-3', value: 'placeholder-key-c', label: 'C', enabled: true, groupId: groups[0]!.id },
+  ], 0, groups, groups[0]!.id);
+
+  assert.equal(restarted.poolId, firstRun.poolId);
+  assert.notEqual(changed.poolId, firstRun.poolId);
+});
+
 test('isolates allocation by active group and releases sessions against their original keys', () => {
   const groups = [
     { id: 'provider-group-default', name: '默认分组' },

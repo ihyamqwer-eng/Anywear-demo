@@ -2,6 +2,31 @@
 
 Date: 2026-10-19
 
+## UI Version and Navigation Icon (2026-10-26)
+
+- Added the root app package version to the brand header on the try-on, provider selection, and provider management pages. Vite injects the version from the root package manifest at build time, avoiding a separately maintained version constant.
+- Replaced the home-page card-pool key icon with an unrelated compass icon; the existing navigation route and behavior remain unchanged.
+- Restricted extension image messages to the expected Chrome extension-origin iframe and reject oversized or unsupported data URLs before decoding or persisting them.
+- Verification: root typecheck, production build, and `git diff --check` passed. Rebuilt and recreated only the Docker frontend service after confirming there were no active provider-key leases; persistent backend data and configuration were left untouched. Checked the home page and health endpoint after restart. No camera or provider generation request was started.
+
+## Persistent Local Settings and 1080p Default (2026-10-26)
+
+- Kept 1080p (1920×1080) as the default camera profile and removed the frontend/WebRTC sender bitrate cap so the browser can adapt the uplink without an application-level Mbps ceiling.
+- Added local-admin multipart garment import. Uploaded files are validated and copied into `ANYWEAR_DATA_DIR/garments`; stored group metadata and images reload after refresh, service restart, and installer updates. Nested directory paths are preserved during upload, and the existing GET garment-group response remains unchanged.
+- API Keys and groups continue to persist in `provider-keys.json` under the installer user data directory. Group pool IDs now remain stable across restarts when the group credentials are unchanged, while key/group changes still invalidate stale manual selections.
+- Verification: root typecheck, production build, all 24 server tests, and `git diff --check` passed. No camera permission or paid provider session was started. The existing test suite still emits one unrelated `MaxListenersExceededWarning`.
+
+## Video Flip Controls (2026-10-23)
+
+- Moved the landscape/portrait, horizontal/vertical flip, garment-panel, and fullscreen controls into the preview column so their absolute positioning is anchored to the video area, not the wider workspace. The flip controls now render on the home page; narrow screens use icon-only flip buttons to keep the toolbar compact.
+- Verification: client typecheck, production build, and `git diff --check` passed. Chrome screenshots were checked at 1440x900 and 390x844 on a local Vite server. No camera or provider session was started.
+
+## Collapsible Preview Panels (2026-10-23)
+
+- Added separate toolbar toggles for capture settings and link diagnostics, plus the existing garment toggle. All three content panels now default to collapsed, persist user choices, and remain controllable in fullscreen. Collapsing both side panels releases the empty workspace grid column.
+- Limited the garment panel to 600px on desktop and to the available viewport width on narrow screens, including fullscreen portrait mode.
+- Verification: client typecheck, production build, `git diff --check`, and local Vite page HTTP 200 on port 5174 passed. No camera or provider session was started.
+
 ## API Key Pool Management (2026-10-20)
 
 - Added a separate `/cards/manage` page linked from `/cards`, with add/label, masked-key hint, active-session count, enable/disable, refresh, and removal controls. Disabling excludes the key from new sessions without interrupting existing sessions. The home try-on page remains unchanged; existing provider-key selection and session request/response shapes remain compatible.
@@ -24,8 +49,10 @@ Date: 2026-10-19
 
 ## Windows Native Installer
 
+- Installer refresh (2026-10-26): rebuilt `installer/output/Anywear-Setup-x64.exe` with Inno Setup 6.7.3 for app version `0.3.1`. The staged frontend includes the visible version marker and compass navigation icon. Installer size is 26,648,052 bytes; SHA-256 is `256CCB5A3CB91FB060C2DDAA2CEB9C9763952D5DEA63BBE0F4C924FE40A8AF89`. The package embeds the local `.env` seed, so treat it as sensitive; the installer is Git-ignored and was not uploaded.
 - Installer refresh (2026-10-20): bumped the app and installer version to `0.2.0` for the API key pool management page. Rebuilt `installer/output/Anywear-Setup-x64.exe` from the current workspace; Inno Setup reports product version `0.2.0`, size is 25.34 MiB, SHA-256 is `005CC3CD5342E681ABCB6413B363B3CCDAD7703F8ED721012DBC6C146D61EC53`, and the staged frontend bundle contains the management route. `npm run package:windows`, `npm run test -w server` (14 tests), and `git diff --check` passed. The installer is a local sensitive artifact, ignored by Git, and was not uploaded.
 - Installer refresh (2026-10-23): bumped the application and installer to `0.3.0` for API key groups. Rebuilt `installer/output/Anywear-Setup-x64.exe`; Inno Setup reports product version `0.3.0`, size is 25.36 MiB, SHA-256 is `1FE1C9318E1CFABE216E46E7F17FDE77B71BC240E2F97FB6F3681C4C3930D7B0`, and the staged bundle contains the group management UI. The installer embeds the ignored `.env` seed and is sensitive; it remains local and is not pushed to GitHub.
+- Installer refresh (2026-10-23): bumped the application and installer to `0.3.1` for the video flip controls. Rebuilt `installer/output/Anywear-Setup-x64.exe` with Inno Setup 6.7.3; size is 25,358,810 bytes and SHA-256 is `2D12FA80C19905FE8057471582A1442D0665924D3FC53F57C0353B7C7B56CC97`. Rebuilt and recreated the Docker frontend/backend services without removing the persistent data volume; backend health is healthy and local pages on ports 5173 and 5174 return HTTP 200. The installer contains the local `.env` seed and remains a sensitive, ignored artifact.
 - Added a current-user Windows x64 Inno Setup package with a bundled Node.js 24 x64 runtime and locked server production dependencies. The local output is `installer/output/Anywear-Setup-x64.exe`; it and installer staging files are Git-ignored.
 - `anywear start`, `status`, `stop`, and `config` run from a new terminal through a current-user PATH entry. The server binds only to `127.0.0.1:1111`, serves the built SPA and API on one origin, and opens the URL in a normal Chrome browser window/tab with Edge fallback (not app mode).
 - The installer seeds `%LOCALAPPDATA%\QingyeTech\Anywear\.env` only when absent. Upgrade and uninstall leave that file intact. The installer first requests an authenticated graceful service shutdown before upgrade/uninstall; a failed stop blocks file replacement/removal. The shutdown token stays in the local state file and is not returned by HTTP APIs.

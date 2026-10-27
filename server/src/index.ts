@@ -1,11 +1,15 @@
 import Fastify, { type FastifyBaseLogger, type FastifyReply, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
+import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
 import { timingSafeEqual } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { createWriteStream, readFileSync } from 'node:fs';
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
+import path, { resolve } from 'node:path';
+import { Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import type { WebSocket } from 'ws';
 import { config } from './config.js';
 import { garments } from './garments.js';
@@ -105,6 +109,7 @@ function providerKeyManagementView() {
 }
 
 await app.register(cors, { origin: config.allowedOrigins });
+await app.register(multipart, { throwFileSizeLimit: false });
 await app.register(websocket);
 await app.register(fastifyStatic, {
   root: resolve(config.applicationRoot, 'client', 'dist'),
@@ -380,6 +385,193 @@ app.patch<{ Params: { id: string }; Body: { groupId?: unknown } }>('/api/admin/p
 app.get('/api/garments', async () => garments.filter((garment) => garment.enabled));
 
 app.get('/api/garment-groups', async () => garmentLibrary.listGroups());
+
+class GarmentImportError extends Error {
+  constructor(message: string, readonly statusCode: number, readonly code: string) {
+    super(message);
+  }
+}
+
+const uploadImageTypes: Record<string, string> = {
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+};
+
+function isPathWithin(root: string, target: string): boolean {
+  const relative = path.relative(root, target);
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
+
+function normalizeUploadPath(filename: string): string {
+  if (typeof filename !== 'string' || !filename) {
+    throw new GarmentImportError('Image file path is invalid', 400, 'INVALID_GARMENT_FILE_PATH');
+  }
+  const normalized = filename.replace(/\\/g, '/');
+  const segments = normalized.split('/');
+  if (!filename || normalized.startsWith('/') || /^[a-zA-Z]:/.test(normalized) || segments.length > 32
+    || segments.some((segment) => !segment || segment === '.' || segment === '..')) {
+    throw new GarmentImportError('Image file path is invalid', 400, 'INVALID_GARMENT_FILE_PATH');
+  }
+  for (const segment of segments) {
+    if (segment.length > 200 || /[\x00-\x1f<>:"|?*]/.test(segment) || /[. ]$/.test(segment)
+      || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(segment)) {
+      throw new GarmentImportError('Image file path is invalid', 400, 'INVALID_GARMENT_FILE_PATH');
+    }
+  }
+  if (normalized.length > 1024) {
+    throw new GarmentImportError('Image file path is too long', 400, 'INVALID_GARMENT_FILE_PATH');
+  }
+  return segments.join(path.sep);
+}
+
+function matchesImageSignature(contentType: string, header: Buffer): boolean {
+  if (contentType === 'image/jpeg') return header.length >= 3 && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff;
+  if (contentType === 'image/png') return header.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  return contentType === 'image/webp'
+    && header.length >= 12
+    && header.toString('ascii', 0, 4) === 'RIFF'
+    && header.toString('ascii', 8, 12) === 'WEBP';
+}
+
+async function stageGarmentImport(request: FastifyRequest): Promise<{ stagingDirectory: string; name?: string; groupId?: string }> {
+  const temporaryRoot = path.join(config.garmentDataDirectory, '.tmp');
+  await mkdir(temporaryRoot, { recursive: true });
+  const uploadRoot = await realpath(config.garmentDataDirectory);
+  const resolvedTemporaryRoot = await realpath(temporaryRoot);
+  if (!isPathWithin(uploadRoot, resolvedTemporaryRoot)) {
+    throw new GarmentImportError('Garment import temporary directory is invalid', 500, 'GARMENT_IMPORT_STORAGE_INVALID');
+  }
+  const stagingDirectory = await mkdtemp(path.join(temporaryRoot, 'import-'));
+  const paths = new Set<string>();
+  let fileCount = 0;
+  let totalBytes = 0;
+  let name: string | undefined;
+  let groupId: string | undefined;
+
+  try {
+    const parts = request.parts({
+      preservePath: true,
+      limits: {
+        files: config.garmentImportMaxFiles,
+        fields: 2,
+        parts: config.garmentImportMaxFiles + 2,
+        fieldSize: 256,
+        fileSize: config.garmentImportMaxImageBytes + 1,
+      },
+    });
+    for await (const part of parts) {
+      if (part.type === 'field') {
+        if (part.valueTruncated || typeof part.value !== 'string') {
+          throw new GarmentImportError('Import fields are invalid', 400, 'INVALID_GARMENT_IMPORT');
+        }
+        if (part.fieldname === 'name') {
+          if (name !== undefined || !part.value.trim() || part.value.trim().length > 80) {
+            throw new GarmentImportError('Group name must contain 1 to 80 characters', 400, 'INVALID_GARMENT_GROUP_NAME');
+          }
+          name = part.value.trim();
+        } else if (part.fieldname === 'groupId') {
+          if (groupId !== undefined || !/^[a-zA-Z0-9_-]{1,64}$/.test(part.value)) {
+            throw new GarmentImportError('Group ID is invalid', 400, 'INVALID_GARMENT_GROUP_ID');
+          }
+          groupId = part.value;
+        } else {
+          throw new GarmentImportError('Import field is not supported', 400, 'INVALID_GARMENT_IMPORT');
+        }
+        continue;
+      }
+
+      if (part.fieldname !== 'images') {
+        part.file.resume();
+        throw new GarmentImportError('Image files must use the images field', 400, 'INVALID_GARMENT_IMPORT');
+      }
+      fileCount += 1;
+      if (fileCount > config.garmentImportMaxFiles) {
+        part.file.resume();
+        throw new GarmentImportError('Too many image files', 413, 'GARMENT_IMPORT_FILE_LIMIT');
+      }
+
+      let relativePath: string;
+      try {
+        relativePath = normalizeUploadPath(part.filename);
+      } catch (error) {
+        part.file.resume();
+        throw error;
+      }
+      const normalizedKey = relativePath.toLocaleLowerCase('en-US');
+      if (paths.has(normalizedKey)) {
+        part.file.resume();
+        throw new GarmentImportError('Image file paths must be unique', 400, 'DUPLICATE_GARMENT_FILE_PATH');
+      }
+      paths.add(normalizedKey);
+
+      const extension = path.extname(relativePath).toLowerCase();
+      const expectedType = uploadImageTypes[extension];
+      if (!expectedType || part.mimetype !== expectedType) {
+        part.file.resume();
+        throw new GarmentImportError('Only JPEG, PNG, and WebP images are supported', 400, 'UNSUPPORTED_GARMENT_IMAGE_TYPE');
+      }
+
+      const outputPath = path.resolve(stagingDirectory, 'files', relativePath);
+      const relativeOutputPath = path.relative(stagingDirectory, outputPath);
+      if (relativeOutputPath.startsWith(`..${path.sep}`) || relativeOutputPath === '..' || path.isAbsolute(relativeOutputPath)) {
+        part.file.resume();
+        throw new GarmentImportError('Image file path is invalid', 400, 'INVALID_GARMENT_FILE_PATH');
+      }
+      await mkdir(path.dirname(outputPath), { recursive: true });
+
+      let fileBytes = 0;
+      let header = Buffer.alloc(0);
+      const inspectStream = new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          fileBytes += chunk.length;
+          totalBytes += chunk.length;
+          if (fileBytes > config.garmentImportMaxImageBytes) {
+            callback(new GarmentImportError('An image exceeds the per-file size limit', 413, 'GARMENT_IMPORT_IMAGE_TOO_LARGE'));
+            return;
+          }
+          if (totalBytes > config.garmentImportMaxTotalBytes) {
+            callback(new GarmentImportError('The import exceeds the total size limit', 413, 'GARMENT_IMPORT_TOTAL_TOO_LARGE'));
+            return;
+          }
+          if (header.length < 12) header = Buffer.concat([header, chunk.subarray(0, 12 - header.length)]);
+          callback(null, chunk);
+        },
+      });
+      await pipeline(part.file, inspectStream, createWriteStream(outputPath, { flags: 'wx', mode: 0o600 }));
+      if (part.file.truncated || fileBytes === 0) {
+        throw new GarmentImportError('Image is empty or exceeds the per-file size limit', 413, 'GARMENT_IMPORT_IMAGE_TOO_LARGE');
+      }
+      if (!matchesImageSignature(expectedType, header)) {
+        throw new GarmentImportError('Image content does not match its file type', 400, 'INVALID_GARMENT_IMAGE_CONTENT');
+      }
+    }
+
+    if (fileCount === 0) throw new GarmentImportError('At least one image is required', 400, 'GARMENT_IMPORT_EMPTY');
+    if (!groupId && !name) throw new GarmentImportError('Group name is required for a new group', 400, 'INVALID_GARMENT_GROUP_NAME');
+    return { stagingDirectory, name, groupId };
+  } catch (error) {
+    await rm(stagingDirectory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+app.post('/api/admin/garment-groups/import', { preHandler: requireLocalAdmin }, async (request, reply) => {
+  if (!request.isMultipart()) {
+    return reply.code(400).send({ error: 'Request must use multipart/form-data', code: 'INVALID_GARMENT_IMPORT' });
+  }
+  let stagingDirectory: string | undefined;
+  try {
+    const stagedImport = await stageGarmentImport(request);
+    stagingDirectory = stagedImport.stagingDirectory;
+    const imported = await garmentLibrary.importStagedGroup(stagedImport);
+    reply.header('Cache-Control', 'no-store');
+    return reply.code(imported.created ? 201 : 200).send(imported.group);
+  } finally {
+    if (stagingDirectory) await rm(stagingDirectory, { recursive: true, force: true });
+  }
+});
 
 app.get<{ Params: { imageId: string } }>('/api/garment-images/:imageId', async (request, reply) => {
   const image = await garmentLibrary.readImage(request.params.imageId);

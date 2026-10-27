@@ -23,6 +23,17 @@ export async function fetchGarmentGroups(): Promise<GarmentGroup[]> {
   return readJson<GarmentGroup[]>(await fetch('/api/garment-groups'));
 }
 
+export async function importGarmentGroup(name: string, files: File[], groupId?: string): Promise<GarmentGroup> {
+  const body = new FormData();
+  body.append('name', name);
+  if (groupId) body.append('groupId', groupId);
+  files.forEach((file) => body.append('images', file, file.webkitRelativePath || file.name));
+  return readJson<GarmentGroup>(await fetch('/api/admin/garment-groups/import', {
+    method: 'POST',
+    body,
+  }));
+}
+
 export async function fetchGarments(): Promise<Garment[]> {
   return readJson<Garment[]>(await fetch('/api/garments'));
 }

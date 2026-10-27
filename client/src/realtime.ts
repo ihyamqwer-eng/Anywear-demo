@@ -6,7 +6,6 @@ const MAX_PENDING_SIGNAL_MESSAGES = 256;
 interface RealtimeOptions {
   session: SessionResponse;
   localStream: MediaStream;
-  maxVideoBitrateBps: number;
   onRemoteStream: (stream: MediaStream) => void;
   onMessage: (message: ProviderMessage) => void;
   onState: (state: RTCPeerConnectionState) => void;
@@ -75,15 +74,6 @@ export class RealtimeConnection {
     this.pc.onconnectionstatechange = () => this.options.onState(this.pc.connectionState);
   }
 
-  private async configureVideoSender(): Promise<void> {
-    const sender = this.pc.getSenders().find((candidate) => candidate.track?.kind === 'video');
-    if (!sender) return;
-    const parameters = sender.getParameters();
-    if (parameters.encodings.length === 0) return;
-    parameters.encodings[0].maxBitrate = this.options.maxVideoBitrateBps;
-    await sender.setParameters(parameters);
-  }
-
   private bitrate(id: string, bytes: number | undefined, timestamp: number): number | null {
     if (bytes === undefined) return null;
     const previous = this.previousByteCounts.get(id);
@@ -136,7 +126,6 @@ export class RealtimeConnection {
       this.options.onSignalState('open');
       this.heartbeatTimer = window.setInterval(() => this.send({ type: 'heartbeat' }), 10_000);
       try {
-        await this.configureVideoSender();
         const offer = await this.pc.createOffer();
         await this.pc.setLocalDescription(offer);
         this.ws.send(JSON.stringify({ type: 'offer', sdp: offer.sdp }));

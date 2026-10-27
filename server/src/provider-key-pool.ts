@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 export const DEFAULT_PROVIDER_GROUP_ID = 'provider-group-default';
 
@@ -79,7 +79,7 @@ export class ProviderKeyPool {
     const sourceGroups = storedGroups.length > 0
       ? storedGroups
       : [{ id: DEFAULT_PROVIDER_GROUP_ID, name: '默认分组' }];
-    this.groups = sourceGroups.map((group) => ({ ...group, poolId: randomUUID() }));
+    this.groups = sourceGroups.map((group) => ({ ...group, poolId: '' }));
     this.activeGroupId = this.groups.some((group) => group.id === activeGroupId)
       ? activeGroupId!
       : this.groups[0]!.id;
@@ -97,6 +97,7 @@ export class ProviderKeyPool {
       const sequence = /^provider-key-(\d+)$/.exec(entry.id)?.[1];
       return sequence ? Math.max(next, Number.parseInt(sequence, 10) + 1) : next;
     }, 1);
+    this.groups.forEach((group) => this.refreshGroupPoolId(group.id));
   }
 
   get poolId(): string {
@@ -166,7 +167,8 @@ export class ProviderKeyPool {
       || candidate.name.toLocaleLowerCase() === group.name.toLocaleLowerCase())) {
       throw new Error('The provider key group changed before it could be added');
     }
-    this.groups.push({ ...group, poolId: randomUUID() });
+    this.groups.push({ ...group, poolId: '' });
+    this.refreshGroupPoolId(group.id);
     if (activate) this.activeGroupId = group.id;
   }
 
@@ -372,7 +374,13 @@ export class ProviderKeyPool {
 
   private refreshGroupPoolId(groupId: string): void {
     const group = this.groups.find((candidate) => candidate.id === groupId);
-    if (group) group.poolId = randomUUID();
+    if (!group) return;
+    const entries = this.entries
+      .filter((entry) => entry.groupId === groupId)
+      .map(({ id, value, enabled }) => ({ id, value, enabled }));
+    group.poolId = createHash('sha256')
+      .update(JSON.stringify({ groupId, entries }))
+      .digest('hex');
   }
 
   private advanceRotationPastEntry(groupId: string, entryId: string): void {

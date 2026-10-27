@@ -12,6 +12,7 @@ import {
   setAdminProviderKeyEnabled,
 } from './api';
 import type { AdminProviderKeyCard, AdminProviderKeyPoolStatus } from './types';
+import AppVersion from './AppVersion';
 
 function ProviderKeyManagerPage() {
   const [pool, setPool] = useState<AdminProviderKeyPoolStatus | null>(null);
@@ -201,7 +202,7 @@ function ProviderKeyManagerPage() {
           <div className="brand-mark"><img src="/brand/qingye-tech-logo.png" alt="青叶科技" /></div>
           <div>
             <p className="eyebrow">LIVE FITTING ROOM</p>
-            <h1>青叶科技</h1>
+            <h1>青叶科技 <AppVersion /></h1>
             <p className="brand-tagline">实时虚拟试衣</p>
           </div>
         </div>

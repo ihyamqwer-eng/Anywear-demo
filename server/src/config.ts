@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 const applicationRoot = resolve(process.env.ANYWEAR_APP_ROOT?.trim() || resolve(moduleDirectory, '..', '..'));
 const dataDirectory = process.env.ANYWEAR_DATA_DIR?.trim();
+const dataRoot = resolve(dataDirectory || resolve(applicationRoot, '.anywear-data'));
 if (process.env.NODE_ENV !== 'test') {
   dotenv.config({ path: dataDirectory ? resolve(dataDirectory, '.env') : resolve(applicationRoot, '.env') });
 }
@@ -12,6 +13,10 @@ if (process.env.NODE_ENV !== 'test') {
 function positiveInteger(name: string, fallback: number): number {
   const value = Number.parseInt(process.env[name] ?? '', 10);
   return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function cappedPositiveInteger(name: string, fallback: number, maximum: number): number {
+  return Math.min(positiveInteger(name, fallback), maximum);
 }
 
 function nonNegativeInteger(name: string, fallback: number): number {
@@ -39,7 +44,7 @@ function garmentGroups(): GarmentGroupConfig[] {
   if (!raw) return [];
   const parsed: unknown = JSON.parse(raw);
   if (!Array.isArray(parsed)) throw new Error('GARMENT_GROUPS_JSON must be a JSON array');
-  const seenIds = new Set<string>(['featured', 'uploaded']);
+  const seenIds = new Set<string>(['featured', 'uploaded', 'user-garment-uploads']);
   return parsed.map((item, index) => {
     if (!item || typeof item !== 'object') throw new Error(`GARMENT_GROUPS_JSON[${index}] must be an object`);
     const group = item as Record<string, unknown>;
@@ -81,12 +86,16 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? defaultAllowedOrigins.joi
 
 export const config = {
   applicationRoot,
-  providerKeyStorePath: resolve(dataDirectory || resolve(applicationRoot, '.anywear-data'), 'provider-keys.json'),
+  providerKeyStorePath: resolve(dataRoot, 'provider-keys.json'),
+  garmentDataDirectory: resolve(dataRoot, 'garments'),
   apiKey: configuredProviderKeys[0] ?? '',
   providerKeys: configuredProviderKeys,
   providerKeyCooldownSeconds: nonNegativeInteger('DECART_KEY_COOLDOWN_SECONDS', 0),
   garmentLibraryRoot: process.env.GARMENT_LIBRARY_ROOT?.trim()
     || resolve(dataDirectory || applicationRoot, 'garment-library'),
+  garmentImportMaxImageBytes: cappedPositiveInteger('GARMENT_IMPORT_MAX_IMAGE_BYTES', 10 * 1024 * 1024, 10 * 1024 * 1024),
+  garmentImportMaxTotalBytes: cappedPositiveInteger('GARMENT_IMPORT_MAX_TOTAL_BYTES', 200 * 1024 * 1024, 200 * 1024 * 1024),
+  garmentImportMaxFiles: cappedPositiveInteger('GARMENT_IMPORT_MAX_FILES', 200, 200),
   garmentGroups: garmentGroups(),
   model: process.env.DECART_MODEL?.trim() || 'lucy-vton-3.6',
   speed,
