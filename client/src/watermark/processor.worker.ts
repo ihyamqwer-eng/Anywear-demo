@@ -2,7 +2,7 @@ import { LabelDetector, grayPixels, highpass, matchReference, scaleRect, capsule
 
 // This worker processes one frame at a time. The caller never queues an unbounded
 // backlog; raw reference frames are bounded by both age and count.
-interface Reference { bitmap: ImageBitmap; gray: GrayFrame; detection: Detection; time: number }
+interface Reference { bitmap: ImageBitmap; gray: GrayFrame; detection: Detection | null; time: number }
 const scope = self as unknown as { onmessage: ((event: MessageEvent<{bitmap:ImageBitmap;time:number;startedAt:number;generation:number}>)=>void)|null; postMessage: (message:unknown,transfer:Transferable[])=>void };
 const analysis = new OffscreenCanvas(1,1);
 const analysisContext = analysis.getContext('2d',{willReadFrequently:true})!;
@@ -17,6 +17,9 @@ let lastStored=-Infinity;
 let previousTime=-Infinity;
 let previousGeneration=-1;
 const THRESHOLD=.58;
+const CLEAN_FRAME_CONFIDENCE_MAX=.25;
+const MIN_CONSECUTIVE_CLEAN_FRAMES=3;
+let cleanFrameStreak=0;
 
 scope.onmessage=({data:{bitmap,time,startedAt,generation}})=>{
   const start=performance.now();
@@ -32,6 +35,7 @@ scope.onmessage=({data:{bitmap,time,startedAt,generation}})=>{
       detector=new LabelDetector(analysis.width,analysis.height);
       reverseDetector=new LabelDetector(analysis.width,analysis.height,true);
       preferredReverse=false;
+      cleanFrameStreak=0;
     }
     previousTime=time;previousGeneration=generation;
     analysisContext.drawImage(bitmap,0,0,analysis.width,analysis.height);
@@ -42,6 +46,7 @@ scope.onmessage=({data:{bitmap,time,startedAt,generation}})=>{
       const alternate=(preferredReverse?detector:reverseDetector).detect(gray,filtered);
       if(alternate.score>detection.score){detection=alternate;if(alternate.score>=THRESHOLD)preferredReverse=!preferredReverse;}
     }
+    cleanFrameStreak=detection.score<CLEAN_FRAME_CONFIDENCE_MAX?cleanFrameStreak+1:0;
     while(references.length&&(time-references[0].time>4||references.length>referenceLimit))references.shift()!.bitmap.close();
     outputContext.drawImage(bitmap,0,0);
     let state:'repaired'|'searching'|'waiting'|'motion'='searching';
@@ -52,7 +57,7 @@ scope.onmessage=({data:{bitmap,time,startedAt,generation}})=>{
       // A short rolling history is causal: never claims future-frame offline quality.
       const candidates=references.filter(r=>time-r.time>.15).slice().reverse();
       for(const ref of candidates) {
-        const match=matchReference(gray,ref.gray,detection.rect,ref.detection.rect);
+        const match=matchReference(gray,ref.gray,detection.rect,ref.detection?.rect??null);
         if(match&&(!best||match.error<best.error))best={ref,...match};
         if(best&&best.error<1.5)break;
       }
@@ -74,11 +79,11 @@ scope.onmessage=({data:{bitmap,time,startedAt,generation}})=>{
           }
         }
       }
-      if(time-lastStored>=.28) {
-        // Always retain ORIGINAL input, never recursively repaired output.
-        while(references.length>=referenceLimit)references.shift()!.bitmap.close();
-        references.push({bitmap,gray,detection,time});lastStored=time;retained=true;
-      }
+    }
+    if(time-lastStored>=.28&&(detection.score>=THRESHOLD||cleanFrameStreak>=MIN_CONSECUTIVE_CLEAN_FRAMES)) {
+      // Keep original pixels only; low-confidence frames can provide clean references.
+      while(references.length>=referenceLimit)references.shift()!.bitmap.close();
+      references.push({bitmap,gray,detection:detection.score>=THRESHOLD?detection:null,time});lastStored=time;retained=true;
     }
     const rendered=output.transferToImageBitmap();
     scope.postMessage({bitmap:rendered,startedAt,generation,state,score:detection.score,alignmentError,elapsedMs:performance.now()-start},[rendered]);

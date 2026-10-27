@@ -4,6 +4,10 @@ export interface Rect { x: number; y: number; width: number; height: number }
 export interface Detection { rect: Rect; score: number }
 export interface GrayFrame { data: Float32Array; width: number; height: number }
 interface Sample { dx: number; dy: number; value: number }
+interface Candidate { x: number; y: number; score: number; anchorX?: number; anchorY?: number }
+const DENSE_RESCAN_INTERVAL_FRAMES=3;
+const MAX_REFINEMENT_CANDIDATES=96;
+const REFINEMENT_RADIUS=3;
 
 export function grayPixels(rgba: Uint8ClampedArray): Float32Array {
   const gray = new Float32Array(rgba.length / 4);
@@ -35,6 +39,7 @@ export class LabelDetector {
   private readonly th: number;
   private readonly scale: number;
   private previous: { x: number; y: number } | null = null;
+  private frameIndex=0;
   constructor(private readonly width: number, private readonly height: number, private readonly mirrored = false) {
     this.scale=height/label.referenceHeight;
     this.tw=Math.round(label.textWidth*this.scale); this.th=Math.round(label.textHeight*this.scale);
@@ -47,40 +52,67 @@ export class LabelDetector {
     }
     if (mirrored) for(let y=0;y<this.th;y++) template.subarray(y*this.tw,(y+1)*this.tw).reverse();
     const hp=highpass(template,this.tw,this.th);
-    this.samples=[];
+    const rawSamples: Sample[]=[];
     // Uniform sampling is important: selecting only white glyph pixels gives false positives.
-    for (let y=1;y<this.th-1;y+=2) for (let x=2;x<this.tw-2;x+=2) this.samples.push({dx:x,dy:y,value:hp[y*this.tw+x]});
-    this.coarse=this.samples.filter((_,i)=>i%3===0);
+    for (let y=1;y<this.th-1;y+=2) for (let x=2;x<this.tw-2;x+=2) rawSamples.push({dx:x,dy:y,value:hp[y*this.tw+x]});
+    this.samples=rawSamples;
+    this.coarse=rawSamples.filter((_,i)=>i%4===0);
     this.sampleNorm=this.samples.reduce((sum,s)=>sum+s.value*s.value,0);
     this.coarseNorm=this.coarse.reduce((sum,s)=>sum+s.value*s.value,0);
   }
   detect(frame: GrayFrame, filtered?:Float32Array): Detection {
+    this.frameIndex++;
     const hp=filtered||highpass(frame.data,frame.width,frame.height);
-    const score=(x:number,y:number,samples:Sample[])=>{
+    const score=(x:number,y:number,samples:Sample[],templateNorm:number)=>{
       if (x<0||y<0||x+this.tw>this.width||y+this.th>this.height) return -1;
       let dot=0, norm=0;
-      const templateNorm=samples===this.coarse?this.coarseNorm:this.sampleNorm;
       for (let i=0;i<samples.length;i++) {
         const s=samples[i], value=hp[(y+s.dy)*this.width+x+s.dx];
         dot+=s.value*value;norm+=value*value;
       }
-      return norm>samples.length*2 ? dot/Math.sqrt(norm*templateNorm) : -1;
+      return norm>samples.length*2 ? Math.max(-1,Math.min(1,dot/Math.sqrt(norm*templateNorm))) : -1;
     };
-    let best={x:0,y:0,score:-1};
-    const consider=(x:number,y:number)=>{const s=score(x,y,this.samples);if(s>best.score)best={x,y,score:s};};
+    const refine=(origin:Candidate,radius=REFINEMENT_RADIUS):Candidate=>{
+      let best={...origin,score:score(origin.x,origin.y,this.samples,this.sampleNorm)};
+      for(let dy=-radius;dy<=radius;dy++)for(let dx=-radius;dx<=radius;dx++){
+        const x=origin.x+dx,y=origin.y+dy,s=score(x,y,this.samples,this.sampleNorm);
+        if(s>best.score)best={x,y,score:s};
+      }
+      return best;
+    };
+    let best:Candidate|null=null;
     if (this.previous) {
-      for(let dy=-2;dy<=2;dy++)for(let dx=-2;dx<=2;dx++)consider(this.previous.x+dx,this.previous.y+dy);
+      let local={x:this.previous.x,y:this.previous.y,score:-1};
+      for(let dy=-12;dy<=12;dy+=4)for(let dx=-24;dx<=24;dx+=4){
+        const x=this.previous.x+dx,y=this.previous.y+dy,s=score(x,y,this.coarse,this.coarseNorm);
+        if(s>local.score)local={x,y,score:s};
+      }
+      best=refine(local);
     }
     // The badge jumps; never keep a stale rectangle solely because it was seen previously.
-    if (best.score<.68) {
-      const candidates: {x:number;y:number;score:number}[]=[];
-      for(let y=0;y<=this.height-this.th;y+=2)for(let x=0;x<=this.width-this.tw;x+=2){
-        const s=score(x,y,this.coarse);
-        if(s>.20)candidates.push({x,y,score:s});
+    const trackingLost=!best||best.score<.68;
+    if (trackingLost||this.frameIndex%20===0) {
+      const peaks:Candidate[]=[];
+      const scanStep=trackingLost||this.frameIndex===1||this.frameIndex%DENSE_RESCAN_INTERVAL_FRAMES===0?2:4;
+      const separationX=Math.min(REFINEMENT_RADIUS+1,Math.max(2,Math.round(this.tw*.04)));
+      const separationY=Math.min(REFINEMENT_RADIUS+1,Math.max(2,Math.round(this.th*.1)));
+      for(let y=0;y<=this.height-this.th;y+=scanStep)for(let x=0;x<=this.width-this.tw;x+=scanStep){
+        const value=score(x,y,this.coarse,this.coarseNorm);
+        if(value<.16)continue;
+        const nearby=peaks.findIndex(p=>Math.abs((p.anchorX??p.x)-x)<separationX&&Math.abs((p.anchorY??p.y)-y)<separationY);
+        if(nearby>=0){if(value>peaks[nearby].score)peaks[nearby]={...peaks[nearby],x,y,score:value};continue;}
+        if(peaks.length<MAX_REFINEMENT_CANDIDATES){peaks.push({x,y,score:value,anchorX:x,anchorY:y});continue;}
+        let weakest=0;
+        for(let i=1;i<peaks.length;i++)if(peaks[i].score<peaks[weakest].score)weakest=i;
+        if(value>peaks[weakest].score)peaks[weakest]={x,y,score:value,anchorX:x,anchorY:y};
       }
-      candidates.sort((a,b)=>b.score-a.score);
-      for(const p of candidates.slice(0,256))for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++)consider(p.x+dx,p.y+dy);
+      peaks.sort((a,b)=>b.score-a.score);
+      for(const peak of peaks){
+        const candidate=refine(peak);
+        if(!best||candidate.score>best.score)best=candidate;
+      }
     }
+    if(!best)best={x:0,y:0,score:-1};
     this.previous=best.score>.5?{x:best.x,y:best.y}:null;
     return {score:best.score,rect:{x:best.x+(this.mirrored ? -(label.badgeWidth+label.badgeOffsetX-label.textWidth) : label.badgeOffsetX)*this.scale,y:best.y+label.badgeOffsetY*this.scale,
       width:label.badgeWidth*this.scale,height:label.badgeHeight*this.scale}};
@@ -99,8 +131,8 @@ export function capsuleAlpha(x:number,y:number,rect:Rect,feather=2):number {
 }
 
 /** Conservative translation alignment. Reject motion/occlusion rather than invent face detail. */
-export function matchReference(current:GrayFrame,reference:GrayFrame,rect:Rect,referenceRect:Rect):{dx:number;dy:number;error:number}|null {
-  if(overlaps(rect,referenceRect,10))return null;
+export function matchReference(current:GrayFrame,reference:GrayFrame,rect:Rect,referenceRect:Rect|null):{dx:number;dy:number;error:number}|null {
+  if(referenceRect&&overlaps(rect,referenceRect,10))return null;
   const {width,height}=current;
   const x0=Math.max(1,Math.floor(rect.x-12)), y0=Math.max(1,Math.floor(rect.y-12));
   const x1=Math.min(width-2,Math.ceil(rect.x+rect.width+12)), y1=Math.min(height-2,Math.ceil(rect.y+rect.height+12));
@@ -110,21 +142,40 @@ export function matchReference(current:GrayFrame,reference:GrayFrame,rect:Rect,r
     points.push({x,y});
   }
   if(points.length<24)return null;
-  const evaluate=(dx:number,dy:number)=>{
+  const overlapsReferenceWatermark=(x:number,y:number,padding:number)=>referenceRect!==null
+    &&x>=referenceRect.x-padding&&x<=referenceRect.x+referenceRect.width+padding
+    &&y>=referenceRect.y-padding&&y<=referenceRect.y+referenceRect.height+padding
+    &&capsuleAlpha(x,y,referenceRect)>.01;
+  const evaluate=(dx:number,dy:number,requireValidGain=true)=>{
     const shifted={...rect,x:rect.x+dx,y:rect.y+dy};
-    if(overlaps(shifted,referenceRect,4)||shifted.x<1||shifted.y<1||shifted.x+rect.width>=width-1||shifted.y+rect.height>=height-1)return Infinity;
-    let sum=0, count=0;
+    if((referenceRect&&overlaps(shifted,referenceRect,4))||shifted.x<1||shifted.y<1||shifted.x+rect.width>=width-1||shifted.y+rect.height>=height-1)return Infinity;
+    let sumCurrent=0,sumReference=0,sumReferenceSquared=0,sumCross=0,count=0;
     for(const p of points){
       const sx=p.x+dx,sy=p.y+dy;
-      if(sx<0||sx>=width||sy<0||sy>=height||(sx>=referenceRect.x-2&&sx<=referenceRect.x+referenceRect.width+2&&sy>=referenceRect.y-2&&sy<=referenceRect.y+referenceRect.height+2&&capsuleAlpha(sx,sy,referenceRect)>.01))continue;
-      const delta=Math.abs(current.data[p.y*width+p.x]-reference.data[sy*width+sx]);
-      sum+=delta;count++;
+      if(sx<0||sx>=width||sy<0||sy>=height||overlapsReferenceWatermark(sx,sy,2))continue;
+      const currentValue=current.data[p.y*width+p.x],referenceValue=reference.data[sy*width+sx];
+      sumCurrent+=currentValue;sumReference+=referenceValue;sumReferenceSquared+=referenceValue*referenceValue;sumCross+=currentValue*referenceValue;count++;
     }
-    return count>=points.length*.85 ? sum/count : Infinity;
+    if(count<points.length*.85)return Infinity;
+    const variance=sumReferenceSquared-sumReference*sumReference/count;
+    const gain=variance>count*16?(sumCross-sumCurrent*sumReference/count)/variance:1;
+    if(requireValidGain&&(gain<.65||gain>1.5))return Infinity;
+    const offset=(sumCurrent-gain*sumReference)/count;
+    let residual=0;
+    for(const p of points){
+      const sx=p.x+dx,sy=p.y+dy;
+      if(sx<0||sx>=width||sy<0||sy>=height||overlapsReferenceWatermark(sx,sy,2))continue;
+      residual+=Math.abs(current.data[p.y*width+p.x]-(gain*reference.data[sy*width+sx]+offset));
+    }
+    return residual/count;
   };
-  let best={dx:0,dy:0,error:evaluate(0,0)};
-  for(let dy=-9;dy<=9;dy+=3)for(let dx=-9;dx<=9;dx+=3){const error=evaluate(dx,dy);if(error<best.error)best={dx,dy,error};}
-  const {dx,dy}=best;
-  for(let oy=-2;oy<=2;oy++)for(let ox=-2;ox<=2;ox++){const error=evaluate(dx+ox,dy+oy);if(error<best.error)best={dx:dx+ox,dy:dy+oy,error};}
+  let best={dx:0,dy:0,error:evaluate(0,0,false)};
+  for(let dy=-18;dy<=18;dy+=6)for(let dx=-18;dx<=18;dx+=6){const error=evaluate(dx,dy,false);if(error<best.error)best={dx,dy,error};}
+  const coarse=best;
+  best={dx:coarse.dx,dy:coarse.dy,error:Infinity};
+  for(let oy=-3;oy<=3;oy++)for(let ox=-3;ox<=3;ox++){
+    const dx=coarse.dx+ox,dy=coarse.dy+oy,error=evaluate(dx,dy);
+    if(error<best.error)best={dx,dy,error};
+  }
   return Number.isFinite(best.error)?best:null;
 }
