@@ -40,10 +40,21 @@ button { font: inherit; }
 
 .video-frame { position: relative; width: 100%; aspect-ratio: 16 / 9; overflow: hidden; border: 1px solid var(--border-default); border-radius: 8px; background: var(--video-canvas); box-shadow: 0 18px 50px rgba(0, 0, 0, .3); isolation: isolate; }
 .video-layer { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; object-position: center; background: var(--video-canvas); transition: opacity 260ms ease; }
+.watermark-processing-canvas { position: fixed; top: 0; left: -2px; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 
 .local-video { transform: scaleX(var(--video-flip-x)) scaleY(var(--video-flip-y)); opacity: 1; }
 .remote-video { transform: scaleX(var(--video-flip-x)) scaleY(var(--video-flip-y)); opacity: 0; }
 .remote-video.is-visible { opacity: 1; }
+.processed-video { pointer-events: none; }
+.watermark-toggle-button[aria-pressed="true"] { color: var(--tech-accent); border-color: rgba(139, 217, 212, .48); }
+.watermark-status-badge { max-width: min(260px, 42vw); }
+.watermark-status-badge span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.watermark-status-badge.is-repaired { color: var(--success); }
+.watermark-status-badge.is-error, .watermark-status-badge.is-late { color: var(--warning); }
+.watermark-diagnostics { min-width: 0; }
+.watermark-diagnostics .diagnostic-context { overflow-wrap: anywhere; }
+.watermark-toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 32px; color: var(--text-secondary); font-size: 12px; }
+.watermark-toggle-row input { width: 16px; height: 16px; margin: 0; accent-color: var(--tech-accent); }
 
 .preview-column.is-portrait .video-frame { width: min(100%, 40.5vh, 405px); max-height: min(72vh, 720px); aspect-ratio: 9 / 16; margin-inline: auto; }
 .preview-column.is-portrait .video-layer { inset: auto; top: 50%; left: 50%; width: 177.7778%; height: 56.25%; max-width: none; transform: translate(-50%, -50%) scaleX(var(--video-flip-x)) scaleY(var(--video-flip-y)) rotate(90deg); }

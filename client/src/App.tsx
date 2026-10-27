@@ -21,6 +21,7 @@ import {
   PictureInPicture2,
   RefreshCw,
   Shirt,
+  Sparkles,
   Smartphone,
   SlidersHorizontal,
   Wifi,
@@ -32,6 +33,7 @@ import AppVersion from './AppVersion';
 import { getSelectedProviderKeySelection } from './provider-key-selection';
 import { downloadDiagnosticLogs, getBrowserDiagnosticContext, getDiagnosticLogs, logDiagnostic, subscribeDiagnosticLogs } from './diagnostics';
 import { RealtimeConnection, type RealtimeMediaStats } from './realtime';
+import { initialWatermarkStatus, RemoteWatermarkProcessor, watermarkStateLabels, type WatermarkStatus } from './watermark';
 import type { Garment, GarmentGroup, ProviderMessage, SessionState } from './types';
 
 type ViewStatus = 'idle' | 'starting' | 'live' | 'switching' | 'error' | 'stopped';
@@ -97,6 +99,15 @@ const maxGroupUploadBytes = 200 * 1024 * 1024;
 const garmentsPerPage = 8;
 const uploadedGroupId = 'user-garment-uploads';
 const cameraPreferenceKey = 'anywear-camera-device-id';
+const watermarkPreferenceKey = 'anywear-local-watermark-processing';
+
+function readWatermarkPreference(): boolean {
+  try {
+    return window.localStorage.getItem(watermarkPreferenceKey) !== 'false';
+  } catch {
+    return true;
+  }
+}
 
 function formatBitrate(value: number | null): string {
   if (value === null) return '--';
@@ -138,10 +149,13 @@ function App() {
   const garmentGridRef = useRef<HTMLDivElement>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const processedVideoRef = useRef<HTMLVideoElement>(null);
+  const processedCanvasRef = useRef<HTMLCanvasElement>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const directoryInputRef = useRef<HTMLInputElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const connectionRef = useRef<RealtimeConnection | null>(null);
+  const watermarkProcessorRef = useRef<RemoteWatermarkProcessor | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const lifecycleRef = useRef(0);
   const selectedIdRef = useRef<string | null>(null);
@@ -165,6 +179,10 @@ function App() {
   const [message, setMessage] = useState('');
   const [usageSeconds, setUsageSeconds] = useState(0);
   const [remoteReady, setRemoteReady] = useState(false);
+  const [remoteStreamGeneration, setRemoteStreamGeneration] = useState(0);
+  const [watermarkEnabled, setWatermarkEnabled] = useState(readWatermarkPreference);
+  const [watermarkHasFrame, setWatermarkHasFrame] = useState(false);
+  const [watermarkStatus, setWatermarkStatus] = useState<WatermarkStatus>(() => initialWatermarkStatus());
   const [viewOrientation, setViewOrientation] = useState<'landscape' | 'portrait'>('landscape');
   const [flipHorizontal, setFlipHorizontal] = useState(true);
   const [flipVertical, setFlipVertical] = useState(false);
@@ -224,8 +242,13 @@ function App() {
     localStreamRef.current = null;
     if (localVideoRef.current) localVideoRef.current.srcObject = null;
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+    watermarkProcessorRef.current?.stop();
+    watermarkProcessorRef.current = null;
+    if (processedVideoRef.current) processedVideoRef.current.srcObject = null;
     setCameraPreviewState('closed');
     setRemoteReady(false);
+    setWatermarkHasFrame(false);
+    setWatermarkStatus(initialWatermarkStatus());
     setCameraSize(null);
     setRemoteSize(null);
     setMediaStats(null);
@@ -527,6 +550,9 @@ function App() {
             remoteVideoRef.current.srcObject = remoteStream;
             void remoteVideoRef.current.play().catch(() => undefined);
           }
+          setWatermarkHasFrame(false);
+          setWatermarkStatus(initialWatermarkStatus());
+          setRemoteStreamGeneration((generation) => generation + 1);
           setStatus('live');
         },
         onMessage: (providerMessage: ProviderMessage) => {
@@ -637,6 +663,116 @@ function App() {
     navigator.mediaDevices?.addEventListener?.('devicechange', handleDeviceChange);
     return () => navigator.mediaDevices?.removeEventListener?.('devicechange', handleDeviceChange);
   }, [refreshCameraDevices]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(watermarkPreferenceKey, String(watermarkEnabled));
+    } catch {
+    }
+  }, [watermarkEnabled]);
+
+  useEffect(() => {
+    if (!watermarkEnabled) {
+      setWatermarkHasFrame(false);
+      if (processedVideoRef.current) processedVideoRef.current.srcObject = null;
+      setWatermarkStatus(initialWatermarkStatus('disabled'));
+      return;
+    }
+    if (!remoteReady) {
+      setWatermarkHasFrame(false);
+      setWatermarkStatus(initialWatermarkStatus());
+      return;
+    }
+    if (pendingGarmentId || queuedGarmentId) {
+      setWatermarkHasFrame(false);
+      setWatermarkStatus({ ...initialWatermarkStatus(), message: '服装切换确认后重新建立处理流' });
+      return;
+    }
+
+    const video = remoteVideoRef.current;
+    const outputVideo = processedVideoRef.current;
+    const outputCanvas = processedCanvasRef.current;
+    if (!video || !outputVideo || !outputCanvas) return;
+
+    let active = true;
+    let outputStream: MediaStream | null = null;
+    let frameCallback: number | null = null;
+    let animationFrame = 0;
+    let lastStatusState: WatermarkStatus['state'] | null = null;
+    setWatermarkHasFrame(false);
+    setWatermarkStatus(initialWatermarkStatus());
+    const processor = new RemoteWatermarkProcessor(video, outputCanvas, {
+      onStatus: (nextStatus) => {
+        if (!active) return;
+        setWatermarkStatus(nextStatus);
+        if (nextStatus.state === 'late' || nextStatus.state === 'error') {
+          setWatermarkHasFrame(false);
+        }
+        if (nextStatus.state === 'error') {
+          outputVideo.srcObject = null;
+        }
+        if (lastStatusState !== nextStatus.state) {
+          lastStatusState = nextStatus.state;
+          logDiagnostic(nextStatus.state === 'error' ? 'warn' : 'info', 'watermark.processor.state', {
+            state: nextStatus.state,
+            message: nextStatus.message,
+            latencyMs: nextStatus.latencyMs,
+            outputFps: nextStatus.outputFps,
+          });
+        }
+      },
+    });
+    watermarkProcessorRef.current = processor;
+    const outputVideoWithCallbacks = outputVideo as HTMLVideoElement & {
+      requestVideoFrameCallback?: (callback: (now: number, metadata: { width: number; height: number }) => void) => number;
+      cancelVideoFrameCallback?: (handle: number) => void;
+    };
+    const watchPresentedFrames = () => {
+      if (!active) return;
+      if (outputVideoWithCallbacks.requestVideoFrameCallback) {
+        frameCallback = outputVideoWithCallbacks.requestVideoFrameCallback((_now, metadata) => {
+          if (!active) return;
+          if (metadata.width > 0 && processor.getStatus().state !== 'late' && processor.getStatus().state !== 'error') {
+            setWatermarkHasFrame(true);
+          }
+          watchPresentedFrames();
+        });
+        return;
+      }
+      animationFrame = window.requestAnimationFrame(() => {
+        if (outputVideo.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && outputVideo.videoWidth > 0 && processor.getStatus().state !== 'late') {
+          setWatermarkHasFrame(true);
+        }
+        watchPresentedFrames();
+      });
+    };
+    void processor.start().then(async (stream) => {
+      if (!active) {
+        processor.stop();
+        return;
+      }
+      outputStream = stream;
+      outputVideo.srcObject = stream;
+      await outputVideo.play();
+      if (active) watchPresentedFrames();
+    }).catch((error: unknown) => {
+      if (!active) return;
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      processor.fail(errorMessage);
+      outputVideo.srcObject = null;
+      logDiagnostic('warn', 'watermark.processor.failed', { message: errorMessage });
+      setWatermarkHasFrame(false);
+      setWatermarkStatus({ ...initialWatermarkStatus('error'), message: errorMessage });
+    });
+    return () => {
+      active = false;
+      if (frameCallback !== null) outputVideoWithCallbacks.cancelVideoFrameCallback?.(frameCallback);
+      window.cancelAnimationFrame(animationFrame);
+      if (outputVideo.srcObject === outputStream) outputVideo.srcObject = null;
+      processor.stop();
+      if (watermarkProcessorRef.current === processor) watermarkProcessorRef.current = null;
+    };
+  }, [pendingGarmentId, queuedGarmentId, remoteReady, remoteStreamGeneration, watermarkEnabled]);
 
   useEffect(() => {
     try {
@@ -771,6 +907,10 @@ function App() {
   const isRunning = status === 'starting' || status === 'live' || status === 'switching';
   const cameraPreviewActive = cameraPreviewState === 'open';
   const cameraSettingsLocked = isRunning || cameraPreviewState !== 'closed';
+  const toggleWatermarkProcessing = () => setWatermarkEnabled((enabled) => !enabled);
+  const watermarkLatency = watermarkStatus.latencyMs === null ? '--' : `${Math.round(watermarkStatus.latencyMs)} ms`;
+  const watermarkP95Latency = watermarkStatus.p95LatencyMs === null ? '--' : `${Math.round(watermarkStatus.p95LatencyMs)} ms`;
+  const watermarkConfidence = watermarkStatus.detectionConfidence === null ? '--' : `${Math.round(watermarkStatus.detectionConfidence * 100)}%`;
   return (
     <main className={`mirror-shell ${isCompactWindow ? 'compact-shell' : ''}`}>
       <header className="topbar">
@@ -799,12 +939,15 @@ function App() {
             <video ref={localVideoRef} className="video-layer local-video" autoPlay muted playsInline onLoadedMetadata={(event) => {
               if (event.currentTarget.videoWidth && event.currentTarget.videoHeight) setCameraSize({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight });
             }} />
-            <video ref={remoteVideoRef} className={`video-layer remote-video ${remoteReady ? 'is-visible' : ''}`} autoPlay muted playsInline onLoadedMetadata={(event) => {
+            <video ref={remoteVideoRef} className={`video-layer remote-video ${remoteReady && !(watermarkEnabled && watermarkHasFrame) ? 'is-visible' : ''}`} autoPlay muted playsInline onLoadedMetadata={(event) => {
               if (event.currentTarget.videoWidth && event.currentTarget.videoHeight) {
                 setRemoteSize({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight });
+                logDiagnostic('info', 'media.remote-resolution', { width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight });
                 setRemoteReady(true);
               }
             }} />
+            <canvas ref={processedCanvasRef} className="watermark-processing-canvas" aria-hidden="true" />
+            <video ref={processedVideoRef} className={`video-layer remote-video processed-video ${watermarkEnabled && watermarkHasFrame ? 'is-visible' : ''}`} muted autoPlay playsInline aria-hidden="true" />
             <div className="stage-shade" />
 
             {!remoteReady && !cameraPreviewActive && (
@@ -817,6 +960,7 @@ function App() {
 
             <div className="stage-meta">
               <div className="meta-item"><Wifi size={15} /> <span>{cameraPreviewActive && !isRunning ? '摄像头预览' : stateLabels[sessionState]}</span></div>
+              {watermarkEnabled && remoteReady && <div className={`meta-item watermark-status-badge is-${watermarkStatus.state}`} title={watermarkStatus.message ?? watermarkStateLabels[watermarkStatus.state]}><Sparkles size={14} /> <span>{watermarkStateLabels[watermarkStatus.state]}</span></div>}
               {usageSeconds > 0 && <div className="usage-counter">{usageSeconds}s</div>}
             </div>
           </div>
@@ -838,6 +982,9 @@ function App() {
                 <FlipVertical2 size={16} /><span>上下翻转</span>
               </button>
             </div>
+            <button className="orientation-button panel-toolbar-button watermark-toggle-button" type="button" onClick={toggleWatermarkProcessing} aria-label={watermarkEnabled ? '关闭本地水印修复' : '开启本地水印修复'} title={watermarkEnabled ? '关闭本地水印修复' : '开启本地水印修复'} aria-pressed={watermarkEnabled}>
+              <Sparkles size={16} />
+            </button>
             <button className="orientation-button panel-toolbar-button" type="button" onClick={() => toggleCollapsedPreference(panelPreferenceKeys.capture, setCapturePanelCollapsed)} aria-label={capturePanelCollapsed ? '展开采集参数栏' : '收起采集参数栏'} title={capturePanelCollapsed ? '展开采集参数栏' : '收起采集参数栏'} aria-controls="capture-parameter-panel" aria-expanded={!capturePanelCollapsed}>
               <SlidersHorizontal size={16} />
             </button>
@@ -983,6 +1130,27 @@ function App() {
                   <div className="metric-item"><span>下行帧率</span><strong>{formatFps(mediaStats?.inboundFramesPerSecond ?? null)}</strong></div>
                 </div>
                 {mediaStats?.qualityLimitationReason && mediaStats.qualityLimitationReason !== 'none' && <p className="warning-note">上行受限：{mediaStats.qualityLimitationReason}</p>}
+              </div>
+
+              <div className="control-section watermark-diagnostics">
+                <div className="section-title"><Sparkles size={15} />本机水印处理</div>
+                <label className="watermark-toggle-row">
+                  <span>启用处理</span>
+                  <input type="checkbox" checked={watermarkEnabled} onChange={toggleWatermarkProcessing} />
+                </label>
+                <p className={`diagnostic-context ${watermarkStatus.state === 'repaired' ? 'is-secure' : ''}`}>
+                  {watermarkStateLabels[watermarkStatus.state]}{watermarkStatus.message ? `：${watermarkStatus.message}` : ''}
+                </p>
+                <div className="metric-grid">
+                  <div className="metric-item"><span>输入分辨率</span><strong>{formatDimension(remoteSize?.width ?? null, remoteSize?.height ?? null)}</strong></div>
+                  <div className="metric-item"><span>输出帧率</span><strong>{formatFps(watermarkStatus.outputFps)}</strong></div>
+                  <div className="metric-item"><span>本地额外延迟</span><strong>{watermarkLatency}</strong></div>
+                  <div className="metric-item"><span>本地延迟 P95</span><strong>{watermarkP95Latency}</strong></div>
+                  <div className="metric-item"><span>检测置信度</span><strong>{watermarkConfidence}</strong></div>
+                  <div className="metric-item"><span>跳帧 / 原帧回退</span><strong>{watermarkStatus.droppedFrames} / {watermarkStatus.fallbackFrames}</strong></div>
+                </div>
+                {watermarkStatus.lastFrameFallback && <p className="warning-note">最近输出帧未能可靠修复，保留原始画面。</p>}
+                <p className="control-note">处理结果通过本机 Canvas 视频流播放；不改动供应商上行流。</p>
               </div>
 
               <div className="control-section">

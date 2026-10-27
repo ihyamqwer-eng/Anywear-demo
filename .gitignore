@@ -10,3 +10,8 @@ garment-library/**
 !garment-library/.gitkeep
 installer/staging/
 installer/output/
+__pycache__/
+*.py[cod]
+watermark-worker/data/*
+!watermark-worker/data/.gitkeep
+!watermark-worker/data/README.md

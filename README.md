@@ -136,13 +136,14 @@ DECART_KEY_COOLDOWN_SECONDS=0
 - `client/public/garments`：浏览器使用的 PNG 试衣参考图。
 - `assets/garments/source-svg`：未公开服务的 SVG 源素材。
 - `server/src`：API、信令代理、会话管理和服装清单。
+- `watermark-worker`：本地 CUDA 视频修复 Worker；权重保存在 Docker 命名卷中。
 - `extension`：网页图片点击捕获和 Anywear 独立小窗扩展。
 - `docker`：Nginx 配置；Dockerfile 与 Compose 文件保留在项目根目录。
 - `docs/HANDOFF.md`：修复记录、验证结果和剩余风险。
 
 ## Docker 启动
 
-Docker 版本把前端和后端封装为两个容器：Nginx 在 `5173` 端口提供页面，并反代 API 和 WebSocket；后端容器不直接暴露到宿主机。初始 Decart API Key 通过 `.env` 注入，不会写入镜像层；卡池管理写入独立的 `anywear-data` 命名卷。
+Docker 版本由前端 Nginx、后端 API 和本地水印 Worker 三个容器组成。Nginx 在 `5173` 端口提供页面，并同源代理 API、实时试衣信令和 `/ws/watermark`；后端与 Worker 不直接暴露到宿主机。初始 Decart API Key 通过 `.env` 注入，不会写入镜像层；卡池管理和 ProPainter 权重分别写入独立的 `anywear-data`、`watermark-models` 命名卷。
 
 ```powershell
 cd D:\workspace-hy\xinghua-策划\anywear-demo
@@ -157,7 +158,15 @@ docker compose up --build
 docker compose down
 ```
 
-容器内后端监听 `0.0.0.0` 仅用于容器网络通信；Docker 前端端口发布到宿主机所有网卡。Windows 防火墙需允许 Private 网络的本地子网访问 TCP `5173`。Docker 化不会把模型变成本地模型，视频生成仍由 Decart 云端完成。
+容器内后端监听 `0.0.0.0` 仅用于容器网络通信；Docker 前端端口发布到宿主机所有网卡。Windows 防火墙需允许 Private 网络的本地子网访问 TCP `5173`。Docker 化不会把试衣生成模型迁移到本机，Decart 生成仍由云端完成；本机水印修复服务另见下节。
+
+## 本机水印修复
+
+试衣远端视频按实际 `videoWidth` / `videoHeight` 取帧；当前上游返回 `1920×1080` 时，浏览器传输和 Worker 回传均保持该完整分辨率，不先缩到 720p。Worker 在完整 1080p 帧上检测水印，只把最多三个 `512×384` 邻域交给 ProPainter，最终将修复区域合成回完整帧。处理频率最多 20 FPS，帧只在浏览器与本机容器内存中经过，不保存到文件。
+
+首次启用前，将经授权的水印局部参考图放到 `watermark-worker/data/watermark-template.png`，画面中保留胶囊、图案和文字，尽量裁掉大块周边场景。该目录内容默认被 Git 忽略；仓库克隆或换机器后需单独配置这张模板。执行 `docker compose up --build` 会构建 GPU Worker；首次启动会从固定的 ProPainter 上游版本和发布地址下载代码依赖与模型权重，权重持久化在 `watermark-models` 卷中。需要支持 NVIDIA GPU 透传的 Docker Compose 环境；没有 CUDA/GPU 时不会静默退回 CPU。模型加载期间页面会继续显示原始远端画面。
+
+水印修复默认开启，可在镜面工具栏关闭。若模板无法匹配、模型未就绪、处理异常或 GPU 不可用，画面保留原视频；局部区域以外不做推理。当前 1080p 输入的实际显存峰值、连续吞吐、端到端延迟与移动水印命中率仍需在目标机器上验证，不能把约 3–5 秒延迟或 15 FPS 作为已达成结果。ProPainter 与其预训练权重采用 NTU S-Lab License 1.0，仅限非商业用途；第三方声明见 `watermark-worker/THIRD_PARTY_NOTICES.md`。不要在未核验许可前分发模型或将其用于商业场景。
 
 ## 效果筛选
 

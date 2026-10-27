@@ -41,6 +41,8 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+      watermark-worker:
+        condition: service_started
     ports:
       - "5173:80"
       - "5443:443"
@@ -63,5 +65,38 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  watermark-worker:
+    build:
+      context: ./watermark-worker
+    gpus: all
+    environment:
+      WATERMARK_MODEL_DIR: /models
+      WATERMARK_TEMPLATE_PATH: /watermark-config/watermark-template.png
+      WATERMARK_BATCH_FRAMES: "60"
+      WATERMARK_MAX_QUEUE_FRAMES: "100"
+      WATERMARK_MAX_ACTIVE_TILES: "3"
+      WATERMARK_DETECTION_THRESHOLD: "0.42"
+    volumes:
+      - watermark-models:/models
+      - type: bind
+        source: ./watermark-worker/data
+        target: /watermark-config
+        read_only: true
+    expose:
+      - "8765"
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10m
+
 volumes:
   anywear-data:
+  watermark-models:
